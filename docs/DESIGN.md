@@ -62,8 +62,8 @@ threads. `--segment-mb` changes it.
 
 ## Search
 
-A query is a glob (`*`, `?`, `\` escapes) matched against any substring of
-a line. Results are always checked on the reconstructed line, so they are
+A query is a glob (`*`, `?`, `\` escapes) or a regular expression, matched
+against any substring of a line (regexes may anchor with `^`/`$`). Results are always checked on the reconstructed line, so they are
 exact. The work is in not reconstructing lines.
 
 **Level 1: the footer.** Each segment records its stream and its timestamp
@@ -72,8 +72,11 @@ them.
 
 **Level 2: templates.** For each template in a surviving segment, logjar
 proves whether *any* line of that template could match, using only the
-template text. The glob becomes a bit-parallel NFA: one bit per pattern
-position, a `*` loops in place. The template becomes a sequence of symbols:
+template text. The pattern becomes a Glushkov position automaton: one bit
+per pattern position, a 256-entry table of which positions accept each
+byte, and a follow set per position. Globs compile to the same automaton
+(`*` is `.*`), so there is one pruning path. The template becomes a
+sequence of symbols:
 
 * literal text: one exact byte each;
 * an integer slot: one or more bytes from `[-0-9]`;
@@ -82,12 +85,20 @@ position, a `*` loops in place. The template becomes a sequence of symbols:
 * the optional leading timestamp: zero or more bytes from the alphabet of
   the segment's timestamp formats.
 
-Running the NFA over that sequence computes, in one pass, every pattern
-position some real line could reach. A character-class slot is a fixpoint
-of "step on any byte in the class" (at most pattern-length iterations, each
-a few shifts and ANDs on a `u128`). A dictionary slot is the union of
-running the NFA over each entry, memoized per input state set, so a
-segment's dictionary is scanned at most once per distinct state.
+Running the automaton over that sequence computes, in one pass, every
+pattern position some real line could reach. A character-class slot is a
+fixpoint of "step on any byte in the class": the class collapses to one
+mask of positions, so each iteration is a follow-set union and an AND on a
+`u128`, with at most pattern-length iterations. A dictionary slot is the
+union of running the automaton over each entry, memoized per input state
+set, so a segment's dictionary is scanned at most once per distinct state.
+A match can end partway through any symbol, so acceptance is checked after
+every byte of literal text and dictionary values, not only at symbol ends.
+
+Anchors need care around the optional timestamp: `^` must be able to match
+both before and after it, so the start-of-line flag stays set until the
+first template symbol. An end anchor requires the final state set to
+accept.
 
 If the accept bit is unreachable, no line of that template can match. Every
 step over-approximates the real lines and never under-approximates, so a
@@ -110,8 +121,9 @@ how much was skipped and why.
 
 ### Alternatives and inversion
 
-`-e A -e B` builds one NFA per pattern; a template survives if any NFA
-accepts. `-v` cannot prune (a template that can't match is precisely what
+`-e A -e B` builds one automaton per pattern; a template survives if any
+accepts. A pattern that matches the empty string matches every line, which
+turns pruning off. `-v` cannot prune (a template that can't match is precisely what
 it wants), so it decodes everything and negates the check.
 
 ## Durability and appends
@@ -132,8 +144,9 @@ mid-segment costs one or two small reads, not a full scan.
 * **Structured logs.** JSON lines compress fine, but each distinct key order
   is a template and values are tokenized as text. A schema-aware encoding
   (as in CLP-S) would do much better.
-* **Regex.** Queries are globs. Regular expressions compile to NFAs too, so
-  pruning extends naturally; it's a parser away.
+* **Big regexes.** A pattern gets at most 127 positions (one `u128`), and
+  `^`/`$` only work at the very start and end. Counted repetition is
+  expanded, so `\d{60}` costs 60 positions.
 * **Variable-level indexes.** A query for a rare integer value still decodes
   every line of the templates where it could occur. Per-column min/max or
   bloom filters would skip those too.
