@@ -95,9 +95,18 @@ enum Cmd {
     /// Search archives with a glob (`*` any run, `?` any byte) without
     /// decompressing them whole
     Grep {
-        pattern: String,
-        #[arg(required = true)]
-        archives: Vec<PathBuf>,
+        /// PATTERN then ARCHIVE..., or just ARCHIVE... when -e is given
+        #[arg(required = true, value_name = "PATTERN|ARCHIVE")]
+        args: Vec<String>,
+        /// A pattern; repeat to match any of several
+        #[arg(short = 'e', long = "regexp", value_name = "PATTERN")]
+        patterns: Vec<String>,
+        /// Select lines that match none of the patterns
+        #[arg(short = 'v', long)]
+        invert_match: bool,
+        /// One JSON object per match: stream, line, time_ns, text
+        #[arg(long)]
+        json: bool,
         /// Case-insensitive (ASCII)
         #[arg(short = 'i', long)]
         ignore_case: bool,
@@ -309,8 +318,10 @@ fn run(cli: Cli) -> Res<ExitCode> {
             }
         }
         Cmd::Grep {
-            pattern,
-            archives,
+            mut args,
+            mut patterns,
+            invert_match,
+            json,
             ignore_case,
             count,
             line_number,
@@ -321,7 +332,18 @@ fn run(cli: Cli) -> Res<ExitCode> {
             max_count,
             stats,
         } => {
-            let mut q = Query::new(&pattern)?.ignore_case(ignore_case);
+            if patterns.is_empty() {
+                patterns.push(args.remove(0));
+            }
+            let archives: Vec<PathBuf> = args.into_iter().map(PathBuf::from).collect();
+            if archives.is_empty() {
+                return Err("no archive given".into());
+            }
+            let mut q = Query::new(&patterns[0])?;
+            for p in &patterns[1..] {
+                q = q.or(p)?;
+            }
+            let mut q = q.ignore_case(ignore_case).invert(invert_match);
             if let Some(t) = after {
                 q = q.after(Query::parse_time(&t)?);
             }
@@ -349,6 +371,16 @@ fn run(cli: Cli) -> Res<ExitCode> {
                     total += 1;
                     if !count {
                         let r = (|| {
+                            if json {
+                                return writeln!(
+                                    out,
+                                    "{{\"stream\":{},\"line\":{},\"time_ns\":{},\"text\":{}}}",
+                                    json_str(names[m.stream as usize].name.as_bytes()),
+                                    m.line_number,
+                                    m.timestamp.map_or("null".to_string(), |t| t.to_string()),
+                                    json_str(&m.line)
+                                );
+                            }
                             if prefix {
                                 write!(out, "{}:", names[m.stream as usize].name)?;
                             }
@@ -520,6 +552,25 @@ fn ingest(output: &Path, name: &str, flush: Duration, flush_bytes: usize, level:
     }
     w.finish()?;
     Ok(())
+}
+
+/// A JSON string literal. Invalid UTF-8 becomes U+FFFD.
+fn json_str(b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len() + 2);
+    out.push('"');
+    for c in String::from_utf8_lossy(b).chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Stream names use forward slashes so archives made on Windows unpack the

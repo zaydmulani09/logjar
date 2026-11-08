@@ -211,3 +211,20 @@ fn ingest_then_compact() {
     assert_eq!(stdout(&run(&["cat", "live.ljar"], &d)), before);
     assert!(stdout(&run(&["stats", "live.ljar"], &d)).contains("in 1 segments"));
 }
+
+#[test]
+fn grep_alternatives_inversion_and_json() {
+    let d = setup("grep2");
+    let o = stdout(&run(&["grep", "-c", "-e", "ERROR", "-e", "WARN", "a.ljar"], &d));
+    assert_eq!(o, "2\n");
+    // 8 lines total, 6 contain "2015" or "Jun"-prefixed sshd lines contain "combo".
+    let o = stdout(&run(&["grep", "-c", "-v", "-e", "2015", "-e", "combo", "a.ljar"], &d));
+    assert_eq!(o, "1\n"); // the stack-trace line
+    let o = stdout(&run(&["grep", "--json", "Slow GC", "a.ljar"], &d));
+    assert_eq!(
+        o,
+        "{\"stream\":\"app.log\",\"line\":4,\"time_ns\":1445191770001000000,\"text\":\"2015-10-18 18:09:30,001 WARN [main] Slow GC pause 412.7 ms\"}\n"
+    );
+    let o = stdout(&run(&["grep", "--json", "Client.java", "a.ljar"], &d));
+    assert!(o.contains("\"time_ns\":null") && o.contains("\"text\":\"\\tat org"), "{o}");
+}
