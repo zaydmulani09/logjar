@@ -133,18 +133,28 @@ fn read_index(file: &mut File) -> Result<(Index, u64)> {
     if let Some(found) = try_trailer(file, size)? {
         return Ok(found);
     }
-    // Torn tail: walk back looking for an older trailer that verifies.
-    // ponytail: linear scan over the whole file; fine for recovery, which is rare.
+    // Torn tail (a crash, or a writer still mid-append): walk backwards in
+    // windows looking for the newest trailer that verifies. Windows overlap
+    // by 3 bytes so a magic split across a boundary is still seen.
+    const WINDOW: u64 = 1 << 20;
+    let mut hi = size;
     let mut buf = Vec::new();
-    file.seek(SeekFrom::Start(0))?;
-    file.read_to_end(&mut buf)?;
-    let mut end = buf.len();
-    while let Some(p) = buf[..end].windows(4).rposition(|w| w == TRAILER_MAGIC) {
-        let candidate_end = (p + 4) as u64;
-        if let Some(found) = try_trailer(file, candidate_end)? {
-            return Ok(found);
+    while hi > HEADER.len() as u64 {
+        let lo = hi.saturating_sub(WINDOW).max(HEADER.len() as u64);
+        buf.resize((hi - lo) as usize, 0);
+        file.seek(SeekFrom::Start(lo))?;
+        file.read_exact(&mut buf)?;
+        let mut end = buf.len();
+        while let Some(p) = buf[..end].windows(4).rposition(|w| w == TRAILER_MAGIC) {
+            if let Some(found) = try_trailer(file, lo + p as u64 + 4)? {
+                return Ok(found);
+            }
+            end = p + 3;
         }
-        end = p + 3;
+        if lo == HEADER.len() as u64 {
+            break;
+        }
+        hi = lo + 3;
     }
     Err(Error::Corrupt("no valid footer"))
 }
@@ -333,6 +343,15 @@ impl Writer {
 
     /// Writes the footer and syncs. Returns the final index.
     pub fn finish(mut self) -> Result<Index> {
+        self.checkpoint()?;
+        Ok(self.index)
+    }
+
+    /// Makes everything written so far durable and visible to readers,
+    /// without closing the writer. Used by long-running ingestion: after a
+    /// crash the archive reopens as of the last checkpoint. Each checkpoint
+    /// leaves its footer behind as a few dead bytes.
+    pub fn checkpoint(&mut self) -> Result<()> {
         let footer = self.index.encode();
         let mut tail = footer.clone();
         tail.extend_from_slice(&self.pos.to_le_bytes());
@@ -341,7 +360,8 @@ impl Writer {
         tail.extend_from_slice(TRAILER_MAGIC);
         self.file.write_all(&tail)?;
         self.file.sync_all()?;
-        Ok(self.index)
+        self.pos += tail.len() as u64;
+        Ok(())
     }
 }
 
@@ -573,6 +593,43 @@ mod tests {
         w.finish().unwrap();
         let a = Archive::open(&p).unwrap();
         assert_eq!(unpack(&a, "x"), b"alpha 1\nbeta 2\n");
+    }
+
+    #[test]
+    fn checkpoints_are_visible_and_survive_a_torn_tail() {
+        let p = tmp("ckpt.ljar");
+        let mut w = Writer::create(&p, Options::default()).unwrap();
+        w.add_stream(
+            "live",
+            &b"first 1
+"[..],
+        )
+        .unwrap();
+        w.checkpoint().unwrap();
+        assert_eq!(
+            unpack(&Archive::open(&p).unwrap(), "live"),
+            b"first 1
+"
+        );
+        w.add_stream(
+            "live",
+            &b"second 2
+"[..],
+        )
+        .unwrap();
+        w.checkpoint().unwrap();
+        // A big unfinished segment after the last checkpoint: the reader
+        // must look back past more than one scan window.
+        let mut f = OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(&vec![0x5a; 3 << 20]).unwrap();
+        drop(f);
+        let a = Archive::open(&p).unwrap();
+        assert_eq!(
+            unpack(&a, "live"),
+            b"first 1
+second 2
+"
+        );
     }
 
     #[test]
