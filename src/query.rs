@@ -40,7 +40,8 @@ enum Source {
 
 #[derive(Clone, Debug)]
 struct Pattern {
-    prog: Prog,
+    /// Always present for regexes; `None` for a glob too long to compile.
+    prog: Option<Prog>,
     /// Globs keep their token form: the two-pointer matcher is faster than
     /// stepping the automaton for the final per-line check.
     glob: Option<Vec<Tok>>,
@@ -80,12 +81,14 @@ fn glob_toks(pattern: &str) -> Vec<Tok> {
 
 fn compile(src: &Source, ignore_case: bool) -> Result<Pattern> {
     Ok(match src {
+        // Globs can't be malformed, only too long for an automaton; those
+        // still match, they just can't prune.
         Source::Glob(g) => Pattern {
-            prog: Prog::glob(g, ignore_case)?,
+            prog: Prog::glob(g, ignore_case).ok(),
             glob: Some(glob_toks(g)),
         },
         Source::Regex(r) => Pattern {
-            prog: Prog::regex(r, ignore_case)?,
+            prog: Some(Prog::regex(r, ignore_case)?),
             glob: None,
         },
     })
@@ -191,7 +194,7 @@ impl Query {
     pub fn is_match(&self, line: &[u8]) -> bool {
         self.pats.iter().any(|p| match &p.glob {
             Some(toks) => self.glob(toks, line),
-            None => p.prog.is_match(line),
+            None => p.prog.as_ref().is_some_and(|r| r.is_match(line)),
         }) != self.invert
     }
 
@@ -247,24 +250,30 @@ pub(crate) struct Pruner<'q> {
 impl<'q> Pruner<'q> {
     /// One pruner per pattern, or `None` when pruning can't help: the query
     /// is inverted, or some pattern matches the empty string (and so every
-    /// line). Callers then just verify every line.
+    /// line), or a glob was too long to get an automaton. Callers then just
+    /// verify every line.
     pub fn all(q: &'q Query, specs: &[Spec]) -> Option<Vec<Pruner<'q>>> {
-        if q.invert || q.pats.iter().any(|p| p.prog.nullable) {
+        if q.invert {
+            return None;
+        }
+        let progs: Vec<&Prog> = q
+            .pats
+            .iter()
+            .map(|p| p.prog.as_ref())
+            .collect::<Option<_>>()?;
+        if progs.iter().any(|p| p.nullable) {
             return None;
         }
         let ts_alpha = ts_alphabet(specs);
         Some(
-            q.pats
-                .iter()
-                .map(|p| {
-                    let prog = &p.prog;
-                    Pruner {
-                        prog,
-                        int_class: prog.mask(|b| b.is_ascii_digit() || b == b'-'),
-                        float_class: prog.mask(|b| b.is_ascii_digit() || b == b'-' || b == b'.'),
-                        dict_class: prog.mask(|b| !message::is_delim(b)),
-                        ts_class: prog.mask(|b| ts_alpha[b as usize]),
-                    }
+            progs
+                .into_iter()
+                .map(|prog| Pruner {
+                    prog,
+                    int_class: prog.mask(|b| b.is_ascii_digit() || b == b'-'),
+                    float_class: prog.mask(|b| b.is_ascii_digit() || b == b'-' || b == b'.'),
+                    dict_class: prog.mask(|b| !message::is_delim(b)),
+                    ts_class: prog.mask(|b| ts_alpha[b as usize]),
                 })
                 .collect(),
         )
@@ -410,6 +419,16 @@ mod tests {
         assert!(q("error").ignore_case(true).is_match(b"ERROR"));
         assert!(q("a*a*a*b").is_match(b"aaaaaaaaab"));
         assert!(!q("a*a*a*b").is_match(b"aaaaaaaaaa"));
+    }
+
+    #[test]
+    fn long_globs_match_without_pruning() {
+        let long = "x".repeat(300);
+        let q = Query::new(&long).unwrap();
+        assert!(q.is_match(format!("a{long}b").as_bytes()));
+        assert!(!q.is_match(&long.as_bytes()[1..]));
+        assert!(Pruner::all(&q, &[]).is_none());
+        assert!(Query::regex(&long).is_err());
     }
 
     fn check(q: &Query, specs: &[Spec], msg: &str) -> bool {
