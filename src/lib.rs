@@ -57,6 +57,7 @@ mod error;
 mod message;
 mod par;
 mod query;
+mod regex;
 mod search;
 mod segment;
 mod timestamp;
