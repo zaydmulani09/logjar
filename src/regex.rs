@@ -151,14 +151,6 @@ impl Prog {
         }
     }
 
-    pub fn run(&self, mut s: Set, mut at_start: bool, bytes: &[u8]) -> Set {
-        for &b in bytes {
-            s = self.step(s, at_start, b);
-            at_start = false;
-        }
-        s
-    }
-
     /// Whether a match can end here, mid-line.
     #[inline]
     pub fn accepts_mid(&self, s: Set) -> bool {
@@ -394,7 +386,7 @@ impl Parser<'_> {
 
 struct Builder {
     follow: Vec<Set>,
-    classes: Vec<Box<[bool; 256]>>,
+    classes: Vec<[bool; 256]>,
 }
 
 /// Glushkov construction: returns (nullable, first, last) of `ast` and
@@ -408,7 +400,7 @@ fn glushkov(ast: &Ast, b: &mut Builder) -> Result<(bool, Set, Set)> {
                     "pattern too large (more than {MAX_POSITIONS} positions)"
                 )));
             }
-            b.classes.push(c.clone());
+            b.classes.push(**c);
             b.follow.push(0);
             (false, 1 << p, 1 << p)
         }

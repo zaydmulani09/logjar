@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::archive::Archive;
 use crate::message::{self, Kind};
-use crate::query::{DictStates, Nfa, Query};
+use crate::query::{DictStates, Pruner, Query};
 use crate::segment::{self, Segment};
 use crate::{par, timestamp, Error, Result};
 
@@ -158,7 +158,7 @@ impl Archive {
         let meta = seg.meta()?;
         st.templates = meta.templates.len() as u64;
         let mut dict: Option<Vec<Vec<u8>>> = None;
-        let candidates: Vec<bool> = match Nfa::all(q, &meta.specs) {
+        let candidates: Vec<bool> = match Pruner::all(q, &meta.specs) {
             None => vec![true; meta.templates.len()],
             Some(nfas) => {
                 let mut out = Vec::with_capacity(meta.templates.len());

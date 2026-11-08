@@ -1,19 +1,19 @@
-//! Glob queries and the template-level pruning that makes search fast.
+//! Queries and the template-level pruning that makes search fast.
 //!
-//! A query is a glob (`*` any run, `?` any byte, `\` escapes) matched
-//! against any substring of a line. Matching is always confirmed on the
-//! fully decoded line, so results are exact. The speed comes from proving,
-//! per template, that *no* line using it can match, before decoding any.
+//! A query is one or more patterns (globs or regexes), any of which may
+//! match anywhere in a line. Matching is always confirmed on the fully
+//! decoded line, so results are exact. The speed comes from proving, per
+//! template, that *no* line using it can match, before decoding any.
 //!
-//! The proof is an automaton intersection. The glob compiles to a
-//! bit-parallel NFA (one bit per pattern position). A template is a
-//! sequence of literal text and typed variable slots; each slot stands for
-//! a language of strings (`-?[0-9]+` for integers, the segment's actual
-//! dictionary values for dictionary variables, and so on). Running the NFA
-//! over that symbolic sequence yields the set of pattern positions any line
-//! of the template could reach. If the accept position is unreachable, the
-//! template is skipped; if every template in a segment is skipped, the
-//! segment's bulky blocks are never inflated.
+//! The proof is an automaton intersection. Each pattern compiles to a
+//! position automaton (see `crate::regex`). A template is a sequence of
+//! literal text and typed variable slots; each slot stands for a language
+//! of strings (`[-0-9]+` for integers, the segment's actual dictionary
+//! values for dictionary variables, and so on). Running the automaton over
+//! that symbolic sequence yields every state some line of the template
+//! could reach. If no accepting state is reachable, the template is
+//! skipped; if every template in a segment is skipped, the segment's bulky
+//! blocks are never inflated.
 //!
 //! Each step over-approximates the real lines, never under-approximates, so
 //! pruning can only skip work that would have found nothing.
@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use crate::message::{self, Kind, Piece};
+use crate::regex::{Prog, Set};
 use crate::timestamp::Spec;
 use crate::{Error, Result};
 
@@ -31,18 +32,33 @@ enum Tok {
     Star,
 }
 
-/// A compiled search: one or more glob patterns (any may match), plus
-/// optional inversion and time window.
+#[derive(Clone, Debug)]
+enum Source {
+    Glob(String),
+    Regex(String),
+}
+
+#[derive(Clone, Debug)]
+struct Pattern {
+    prog: Prog,
+    /// Globs keep their token form: the two-pointer matcher is faster than
+    /// stepping the automaton for the final per-line check.
+    glob: Option<Vec<Tok>>,
+}
+
+/// A compiled search: one or more patterns (any may match), plus optional
+/// inversion and time window.
 #[derive(Clone, Debug)]
 pub struct Query {
-    pats: Vec<Vec<Tok>>,
+    sources: Vec<Source>,
+    pats: Vec<Pattern>,
     ignore_case: bool,
     invert: bool,
     pub(crate) after: Option<i64>,
     pub(crate) before: Option<i64>,
 }
 
-fn parse_glob(pattern: &str) -> Vec<Tok> {
+fn glob_toks(pattern: &str) -> Vec<Tok> {
     let mut toks = vec![Tok::Star];
     let mut it = pattern.bytes();
     while let Some(b) = it.next() {
@@ -62,28 +78,74 @@ fn parse_glob(pattern: &str) -> Vec<Tok> {
     toks
 }
 
+fn compile(src: &Source, ignore_case: bool) -> Result<Pattern> {
+    Ok(match src {
+        Source::Glob(g) => Pattern {
+            prog: Prog::glob(g, ignore_case)?,
+            glob: Some(glob_toks(g)),
+        },
+        Source::Regex(r) => Pattern {
+            prog: Prog::regex(r, ignore_case)?,
+            glob: None,
+        },
+    })
+}
+
 impl Query {
-    /// Parses a glob. The pattern matches anywhere in a line, as if wrapped
-    /// in `*...*`. An empty pattern matches every line.
-    pub fn new(pattern: &str) -> Result<Query> {
-        Ok(Query {
-            pats: vec![parse_glob(pattern)],
+    fn from(src: Source) -> Result<Query> {
+        let mut q = Query {
+            sources: Vec::new(),
+            pats: Vec::new(),
             ignore_case: false,
             invert: false,
             after: None,
             before: None,
-        })
+        };
+        q.push(src)?;
+        Ok(q)
     }
 
-    /// Adds an alternative: lines matching any pattern match the query.
+    fn push(&mut self, src: Source) -> Result<()> {
+        self.pats.push(compile(&src, self.ignore_case)?);
+        self.sources.push(src);
+        Ok(())
+    }
+
+    /// Parses a glob: `*` any run, `?` any byte, `\` escapes. The pattern
+    /// matches anywhere in a line. An empty pattern matches every line.
+    pub fn new(pattern: &str) -> Result<Query> {
+        Query::from(Source::Glob(pattern.to_string()))
+    }
+
+    /// Parses a regular expression, matched anywhere in a line unless
+    /// anchored with `^`/`$`. Byte-oriented; supports classes, `\d \w \s`,
+    /// groups, `|`, `* + ?` and `{m,n}`.
+    pub fn regex(pattern: &str) -> Result<Query> {
+        Query::from(Source::Regex(pattern.to_string()))
+    }
+
+    /// Adds a glob alternative: lines matching any pattern match the query.
     pub fn or(mut self, pattern: &str) -> Result<Query> {
-        self.pats.push(parse_glob(pattern));
+        self.push(Source::Glob(pattern.to_string()))?;
+        Ok(self)
+    }
+
+    /// Adds a regex alternative.
+    pub fn or_regex(mut self, pattern: &str) -> Result<Query> {
+        self.push(Source::Regex(pattern.to_string()))?;
         Ok(self)
     }
 
     /// ASCII case-insensitive matching.
     pub fn ignore_case(mut self, yes: bool) -> Query {
-        self.ignore_case = yes;
+        if yes != self.ignore_case {
+            self.ignore_case = yes;
+            self.pats = self
+                .sources
+                .iter()
+                .map(|s| compile(s, yes).expect("pattern compiled before"))
+                .collect();
+        }
         self
     }
 
@@ -125,9 +187,12 @@ impl Query {
         self.after.is_none_or(|a| hi >= a) && self.before.is_none_or(|b| lo < b)
     }
 
-    /// True if some pattern is just `*`: every line matches, pruning is moot.
-    pub(crate) fn matches_everything(&self) -> bool {
-        !self.invert && self.pats.iter().any(|p| p == &[Tok::Star])
+    /// Exact check on a decoded line (ignores the time window).
+    pub fn is_match(&self, line: &[u8]) -> bool {
+        self.pats.iter().any(|p| match &p.glob {
+            Some(toks) => self.glob(toks, line),
+            None => p.prog.is_match(line),
+        }) != self.invert
     }
 
     fn eq(&self, p: u8, b: u8) -> bool {
@@ -136,11 +201,6 @@ impl Query {
         } else {
             p == b
         }
-    }
-
-    /// Exact check on a decoded line (ignores the time window).
-    pub fn is_match(&self, line: &[u8]) -> bool {
-        self.pats.iter().any(|p| self.glob(p, line)) != self.invert
     }
 
     fn glob(&self, p: &[Tok], line: &[u8]) -> bool {
@@ -174,148 +234,82 @@ impl Query {
     }
 }
 
-/// Pattern positions as a bitset: bit `j` = "next token to match is `j`",
-/// bit `m` = accepted.
-type Set = u128;
-
-/// The glob as a bit-parallel NFA, specialised for one segment.
-pub(crate) struct Nfa {
-    star: Set,
-    accept: Set,
-    /// Positions that consume byte `b` and advance (literal `b` or `?`).
-    lit: Box<[Set; 256]>,
-    /// Same, for every byte of a variable's character class.
+/// One pattern's automaton with the byte classes of a segment's variable
+/// slots precomputed.
+pub(crate) struct Pruner<'q> {
+    prog: &'q Prog,
     int_class: Set,
     float_class: Set,
     dict_class: Set,
     ts_class: Set,
 }
 
-impl Nfa {
-    /// One automaton per pattern, or `None` when pruning can't help: the
-    /// query is inverted, matches everything, or has a pattern too long for
-    /// the bitset. Callers then just verify every line.
-    pub fn all(q: &Query, specs: &[Spec]) -> Option<Vec<Nfa>> {
-        if q.invert || q.matches_everything() {
+impl<'q> Pruner<'q> {
+    /// One pruner per pattern, or `None` when pruning can't help: the query
+    /// is inverted, or some pattern matches the empty string (and so every
+    /// line). Callers then just verify every line.
+    pub fn all(q: &'q Query, specs: &[Spec]) -> Option<Vec<Pruner<'q>>> {
+        if q.invert || q.pats.iter().any(|p| p.prog.nullable) {
             return None;
         }
-        q.pats.iter().map(|p| Nfa::new(q, p, specs)).collect()
-    }
-
-    fn new(q: &Query, toks: &[Tok], specs: &[Spec]) -> Option<Nfa> {
-        let m = toks.len();
-        if m >= Set::BITS as usize {
-            return None;
-        }
-        let mut lit = Box::new([0 as Set; 256]);
-        let mut star = 0;
-        for (j, t) in toks.iter().enumerate() {
-            match *t {
-                Tok::Star => star |= 1 << j,
-                Tok::Any => lit.iter_mut().for_each(|s| *s |= 1 << j),
-                Tok::Lit(c) => {
-                    for b in 0..=255u8 {
-                        if q.eq(c, b) {
-                            lit[b as usize] |= 1 << j;
-                        }
-                    }
-                }
-            }
-        }
-        let class = |pred: &dyn Fn(u8) -> bool| {
-            (0..=255u8)
-                .filter(|&b| pred(b))
-                .fold(0, |s, b| s | lit[b as usize])
-        };
-        let int_class = class(&|b| b.is_ascii_digit() || b == b'-');
-        let float_class = class(&|b| b.is_ascii_digit() || b == b'-' || b == b'.');
-        let dict_class = class(&|b| !message::is_delim(b));
         let ts_alpha = ts_alphabet(specs);
-        let ts_class = class(&|b| ts_alpha[b as usize]);
-        Some(Nfa {
-            star,
-            accept: 1 << m,
-            lit,
-            int_class,
-            float_class,
-            dict_class,
-            ts_class,
-        })
-    }
-
-    fn close(&self, s: Set) -> Set {
-        s | ((s & self.star) << 1)
-    }
-
-    pub fn start(&self) -> Set {
-        self.close(1)
-    }
-
-    fn step(&self, s: Set, b: u8) -> Set {
-        self.close(((s & self.lit[b as usize]) << 1) | (s & self.star))
-    }
-
-    fn step_class(&self, s: Set, class: Set) -> Set {
-        self.close(((s & class) << 1) | (s & self.star))
-    }
-
-    /// States after one or more bytes of `class`.
-    fn plus(&self, s: Set, class: Set) -> Set {
-        let mut reach = self.step_class(s, class);
-        let mut frontier = reach;
-        loop {
-            frontier = self.step_class(frontier, class);
-            if frontier & !reach == 0 {
-                return reach;
-            }
-            reach |= frontier;
-        }
-    }
-
-    fn run(&self, mut s: Set, bytes: &[u8]) -> Set {
-        for &b in bytes {
-            s = self.step(s, b);
-        }
-        s
-    }
-
-    pub fn accepts(&self, s: Set) -> bool {
-        s & self.accept != 0
+        Some(
+            q.pats
+                .iter()
+                .map(|p| {
+                    let prog = &p.prog;
+                    Pruner {
+                        prog,
+                        int_class: prog.mask(|b| b.is_ascii_digit() || b == b'-'),
+                        float_class: prog.mask(|b| b.is_ascii_digit() || b == b'-' || b == b'.'),
+                        dict_class: prog.mask(|b| !message::is_delim(b)),
+                        ts_class: prog.mask(|b| ts_alpha[b as usize]),
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Could any line of this template, under any of the segment's
     /// timestamp formats (or none), match? With `dict`, dictionary slots are
     /// limited to the segment's real values; without it, to their class.
-    pub fn template_may_match(&self, pieces: &[Piece], dict: Option<&mut DictStates>) -> bool {
-        let mut dict = dict;
+    pub fn template_may_match(&self, pieces: &[Piece], mut dict: Option<&mut DictStates>) -> bool {
+        let p = self.prog;
         // Leading timestamp: zero or more bytes of the timestamp alphabet.
-        let mut s = self.start();
-        s |= self.plus(s, self.ts_class);
-        if self.accepts(s) {
+        // After it we may or may not still be at the start of the line;
+        // keeping `at_start` true over-approximates both cases.
+        let mut s = p.plus(0, true, self.ts_class);
+        let mut at_start = true;
+        if p.accepts_mid(s) {
             return true;
         }
-        for p in pieces {
-            s = match p {
-                Piece::Text(t) => self.run(s, t),
-                Piece::Var(Kind::Int) => self.plus(s, self.int_class),
-                Piece::Var(Kind::Float) => self.plus(s, self.float_class),
+        for piece in pieces {
+            s = match piece {
+                Piece::Text(t) => match run_hit(p, s, at_start, t) {
+                    Some(s) => s,
+                    None => return true,
+                },
+                Piece::Var(Kind::Int) => p.plus(s, at_start, self.int_class),
+                Piece::Var(Kind::Float) => p.plus(s, at_start, self.float_class),
                 Piece::Var(Kind::Dict) => match dict.as_deref_mut() {
-                    Some(d) => d.after(self, s),
-                    None => self.plus(s, self.dict_class),
+                    Some(d) => d.after(self, s, at_start),
+                    None => p.plus(s, at_start, self.dict_class),
                 },
             };
-            if self.accepts(s) {
+            at_start = false;
+            if p.accepts_mid(s) {
                 return true;
             }
         }
-        false
+        s & p.last != 0
     }
 }
 
-/// Memoized "states after reading some dictionary value" for one segment.
+/// Memoized "states after reading some dictionary value" for one segment
+/// and one pattern.
 pub(crate) struct DictStates<'d> {
     dict: &'d [Vec<u8>],
-    memo: HashMap<Set, Set>,
+    memo: HashMap<(Set, bool), Set>,
 }
 
 impl<'d> DictStates<'d> {
@@ -326,24 +320,43 @@ impl<'d> DictStates<'d> {
         }
     }
 
-    fn after(&mut self, nfa: &Nfa, s: Set) -> Set {
-        if let Some(&r) = self.memo.get(&s) {
+    fn after(&mut self, pr: &Pruner<'_>, s: Set, at_start: bool) -> Set {
+        if let Some(&r) = self.memo.get(&(s, at_start)) {
             return r;
         }
         // ponytail: scans the whole dictionary once per distinct state set;
         // an FST or suffix index over the dictionary is the upgrade if
         // dictionaries get huge.
+        let full = pr.prog.plus(s, at_start, pr.dict_class);
         let mut r = 0;
-        let full = nfa.plus(s, nfa.dict_class);
         for v in self.dict {
-            r |= nfa.run(s, v);
+            match run_hit(pr.prog, s, at_start, v) {
+                Some(after) => r |= after,
+                // A match ends inside this value: report it through `last`.
+                None => {
+                    r |= pr.prog.last;
+                    break;
+                }
+            }
             if r == full {
                 break; // can't get any wider than the class bound
             }
         }
-        self.memo.insert(s, r);
+        self.memo.insert((s, at_start), r);
         r
     }
+}
+
+/// Steps over literal bytes; `None` if a match can end partway through.
+fn run_hit(p: &Prog, mut s: Set, mut at_start: bool, bytes: &[u8]) -> Option<Set> {
+    for &b in bytes {
+        s = p.step(s, at_start, b);
+        at_start = false;
+        if p.accepts_mid(s) {
+            return None;
+        }
+    }
+    Some(s)
 }
 
 fn ts_alphabet(specs: &[Spec]) -> [bool; 256] {
@@ -399,45 +412,70 @@ mod tests {
         assert!(!q("a*a*a*b").is_match(b"aaaaaaaaaa"));
     }
 
+    fn check(q: &Query, specs: &[Spec], msg: &str) -> bool {
+        Pruner::all(q, specs)
+            .unwrap()
+            .remove(0)
+            .template_may_match(&tpl(msg), None)
+    }
+
     #[test]
     fn template_pruning() {
         let specs = [Spec::new("%Y-%m-%d %H:%M:%S,%3")];
-        let check = |pat: &str, msg: &str| {
-            let q = Query::new(pat).unwrap();
-            Nfa::all(&q, &specs)
-                .unwrap()
-                .remove(0)
-                .template_may_match(&tpl(msg), None)
-        };
+        let g = |pat: &str, msg: &str| check(&Query::new(pat).unwrap(), &specs, msg);
         // Static text decides.
-        assert!(check("Exception", "java.lang.NullPointerException at foo"));
+        assert!(g("Exception", "java.lang.NullPointerException at foo"));
         // Integer slots cannot hold letters; dictionary slots could, until the
         // real dictionary is consulted (see dictionary_refinement).
-        assert!(!check("Exception", "Received 12 bytes in 0.5 s"));
-        assert!(check("Exception", "Received block blk_1 of size 5"));
+        assert!(!g("Exception", "Received 12 bytes in 0.5 s"));
+        assert!(g("Exception", "Received block blk_1 of size 5"));
         // Values can only come from slots of a compatible type.
-        assert!(check("size 671", "Received block blk_1 of size 67108864"));
-        assert!(!check("size abc", "Received block blk_1 of size 67108864"));
-        assert!(check(
-            "blk_-16*size",
+        assert!(g("size 671", "Received block blk_1 of size 67108864"));
+        assert!(!g("size abc", "Received block blk_1 of size 67108864"));
+        assert!(g("blk_-16*size", "Received block blk_1 of size 67108864"));
+        // Queries touching the timestamp still match via the ts alphabet.
+        assert!(g("2015-10-18 18:01", "INFO main started"));
+        assert!(!g("2015-10-18 ERROR", "INFO main started"));
+    }
+
+    #[test]
+    fn regex_pruning_and_anchors() {
+        let specs = [Spec::new("%Y-%m-%d %H:%M:%S,%3")];
+        let r = |pat: &str, msg: &str| check(&Query::regex(pat).unwrap(), &specs, msg);
+        assert!(r(r"size \d{5,}", "Received block blk_1 of size 67108864"));
+        assert!(!r(
+            r"of size [a-z]",
             "Received block blk_1 of size 67108864"
         ));
-        // Queries touching the timestamp still match via the ts alphabet.
-        assert!(check("2015-10-18 18:01", "INFO main started"));
-        assert!(!check("2015-10-18 ERROR", "INFO main started"));
+        assert!(r(
+            "(WARN|ERROR) .*timeout",
+            "ERROR request timeout after 3 s"
+        ));
+        assert!(!r(
+            "(WARN|ERROR) .*timeout",
+            "INFO request timeout after 3 s"
+        ));
+        // End anchor: the template must be able to end in a match.
+        assert!(r(r"ms$", "GC pause 4.5 ms"));
+        assert!(!r(r"ms$", "GC pause 4.5 ms total"));
+        assert!(r(r"\d$", "retries 3"));
+        // Start anchor: only reachable through the (optional) timestamp.
+        assert!(r("^2015-10", "INFO started"));
+        assert!(!r("^INFO x", "WARN INFO x"));
+        assert!(r("^INFO x", "INFO x"));
     }
 
     #[test]
     fn dictionary_refinement() {
         let specs: [Spec; 0] = [];
         let q = Query::new("blk_42 ").unwrap();
-        let nfa = Nfa::all(&q, &specs).unwrap().remove(0);
+        let pr = Pruner::all(&q, &specs).unwrap().remove(0);
         let t = tpl("Deleting block blk_1 file /data/x");
         let has = vec![b"blk_1".to_vec(), b"blk_42".to_vec()];
         let hasnt = vec![b"blk_1".to_vec(), b"blk_420".to_vec()];
-        assert!(nfa.template_may_match(&t, None));
-        assert!(nfa.template_may_match(&t, Some(&mut DictStates::new(&has))));
-        assert!(!nfa.template_may_match(&t, Some(&mut DictStates::new(&hasnt))));
+        assert!(pr.template_may_match(&t, None));
+        assert!(pr.template_may_match(&t, Some(&mut DictStates::new(&has))));
+        assert!(!pr.template_may_match(&t, Some(&mut DictStates::new(&hasnt))));
     }
 
     /// Pruning must never reject a template that a real line matches.
@@ -454,7 +492,7 @@ mod tests {
             (s % n as u64) as usize
         };
         let specs = [Spec::new("%Y-%m-%d %H:%M:%S")];
-        for _ in 0..3000 {
+        for _ in 0..4000 {
             let mut line = String::new();
             if rnd(2) == 0 {
                 line.push_str("2016-02-29 23:59:01");
@@ -464,18 +502,53 @@ mod tests {
             }
             let start = rnd(line.len() + 1);
             let end = start + rnd(line.len() - start + 1);
-            let mut pat: String = line[start..end].to_string();
-            if pat.len() > 2 && rnd(3) == 0 {
-                let k = rnd(pat.len());
-                pat.replace_range(k..k + 1, if rnd(2) == 0 { "*" } else { "?" });
-            }
-            let q = Query::new(&pat).unwrap();
-            assert!(q.is_match(line.as_bytes()), "{pat:?} in {line:?}");
-            let (ts_len, msg) = match crate::timestamp::detect_with(&specs, 0, line.as_bytes()) {
-                Some((_, _, n)) => (n, &line[n..]),
-                None => (0, &line[..]),
+            let piece = &line[start..end];
+            let q = match rnd(3) {
+                // Glob with a wildcard swapped in.
+                0 => {
+                    let mut pat = piece
+                        .replace('\\', "\\\\")
+                        .replace('*', "\\*")
+                        .replace('?', "\\?");
+                    if pat.len() > 2 {
+                        let k = rnd(pat.len());
+                        if pat.is_char_boundary(k)
+                            && pat.is_char_boundary(k + 1)
+                            && &pat[k..k + 1] != "\\"
+                        {
+                            pat.replace_range(k..k + 1, if rnd(2) == 0 { "*" } else { "?" });
+                        }
+                    }
+                    Query::new(&pat).unwrap()
+                }
+                // Regex: escaped literal, digits generalized, maybe anchored.
+                _ => {
+                    let mut re = String::new();
+                    for c in piece.chars() {
+                        match c {
+                            '0'..='9' if rnd(2) == 0 => re.push_str("\\d+"),
+                            c if c.is_ascii_alphanumeric() || c == ' ' => re.push(c),
+                            c => re.push_str(&format!("\\x{:02x}", c as u32)),
+                        }
+                    }
+                    if start == 0 && rnd(2) == 0 {
+                        re.insert(0, '^');
+                    }
+                    if end == line.len() && rnd(2) == 0 {
+                        re.push('$');
+                    }
+                    Query::regex(&re).unwrap()
+                }
             };
-            let _ = ts_len;
+            if !q.is_match(line.as_bytes()) {
+                // `\d+` can't match the "-" of a negative-looking glob swap etc.;
+                // only matching lines are interesting for soundness.
+                continue;
+            }
+            let msg = match crate::timestamp::detect_with(&specs, 0, line.as_bytes()) {
+                Some((_, _, n)) => &line[n..],
+                None => &line[..],
+            };
             let (mut t, mut vars) = (Vec::new(), Vec::new());
             message::encode(msg.as_bytes(), &mut t, &mut vars);
             let dict: Vec<Vec<u8>> = vars
@@ -485,19 +558,19 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            // An empty pattern matches everything; there is nothing to prune.
-            let Some(mut nfas) = Nfa::all(&q, &specs) else {
+            // Patterns matching the empty string match everything: nothing to prune.
+            let Some(mut prs) = Pruner::all(&q, &specs) else {
                 continue;
             };
-            let nfa = nfas.remove(0);
+            let pr = prs.remove(0);
             let pieces = message::pieces(&t).unwrap();
             assert!(
-                nfa.template_may_match(&pieces, None),
-                "coarse: {pat:?} in {line:?}"
+                pr.template_may_match(&pieces, None),
+                "coarse: {q:?} in {line:?}"
             );
             assert!(
-                nfa.template_may_match(&pieces, Some(&mut DictStates::new(&dict))),
-                "dict: {pat:?} in {line:?}"
+                pr.template_may_match(&pieces, Some(&mut DictStates::new(&dict))),
+                "dict: {q:?} in {line:?}"
             );
         }
     }
