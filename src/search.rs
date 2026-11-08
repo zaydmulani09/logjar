@@ -245,6 +245,25 @@ impl Archive {
         Ok(st)
     }
 
+    /// Decodes every segment and checks block checksums and line counts.
+    /// Returns the number of lines verified.
+    pub fn verify(&self) -> Result<u64> {
+        let mut lines = 0;
+        for (i, info) in self.index().segments.iter().enumerate() {
+            let seg = self.read_segment(i)?;
+            let mut n = 0u64;
+            segment::decode_all(&seg, info.lines as usize, |_| {
+                n += 1;
+                Ok(())
+            })?;
+            if n != info.lines {
+                return Err(Error::Corrupt("segment line count"));
+            }
+            lines += n;
+        }
+        Ok(lines)
+    }
+
     /// Every distinct template in the archive with its line count, most
     /// common first. Reads only the `meta` blocks.
     pub fn templates(&self) -> Result<Vec<(String, u64)>> {
@@ -315,6 +334,36 @@ fn decode_candidates<T>(
 mod tests {
     use super::*;
     use crate::{Options, Writer};
+
+    #[test]
+    fn verify_catches_a_flipped_bit() {
+        let p = std::env::temp_dir().join(format!("logjar-verify-{}.ljar", std::process::id()));
+        let text: String = (0..2000)
+            .map(|i| {
+                format!(
+                    "worker {} handled job {} in {}ms
+",
+                    i % 7,
+                    i * 13,
+                    i % 97
+                )
+            })
+            .collect();
+        let mut w = Writer::create(&p, Options::default()).unwrap();
+        w.add_stream("w.log", text.as_bytes()).unwrap();
+        w.finish().unwrap();
+        assert_eq!(Archive::open(&p).unwrap().verify().unwrap(), 2000);
+
+        let mut bytes = std::fs::read(&p).unwrap();
+        let seg = Archive::open(&p).unwrap().index().segments[0].clone();
+        let mid = (seg.offset + seg.len * 3 / 4) as usize; // inside the vars block
+        bytes[mid] ^= 0x10;
+        std::fs::write(&p, &bytes).unwrap();
+        assert!(matches!(
+            Archive::open(&p).unwrap().verify(),
+            Err(Error::Corrupt(_))
+        ));
+    }
 
     #[test]
     fn search_matches_naive_scan() {

@@ -195,8 +195,12 @@ impl Builder {
         let mut bytes = Vec::new();
         let mut dir = Vec::new();
         let mut body = Vec::new();
+        // Every block carries zstd's content checksum, so a flipped bit in
+        // any block is reported as corruption instead of decoding to garbage.
+        let mut zc = zstd::bulk::Compressor::new(level)?;
+        zc.set_parameter(zstd::zstd_safe::CParameter::ChecksumFlag(true))?;
         for block in &raw {
-            let c = zstd::bulk::compress(block, level)?;
+            let c = zc.compress(block)?;
             varint::put_u64(&mut dir, block.len() as u64);
             varint::put_u64(&mut dir, c.len() as u64);
             body.extend_from_slice(&c);

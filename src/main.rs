@@ -126,6 +126,11 @@ enum Cmd {
         #[arg(long)]
         stats: bool,
     },
+    /// Decode everything and check checksums; exit 2 if anything is wrong
+    Verify {
+        #[arg(required = true)]
+        archives: Vec<PathBuf>,
+    },
     /// Show where an archive's bytes go, block by block
     Stats { archive: PathBuf },
     /// Show the distinct line templates (log types), most common first
@@ -391,6 +396,21 @@ fn run(cli: Cli) -> Res<ExitCode> {
             } else {
                 ExitCode::from(1)
             });
+        }
+        Cmd::Verify { archives } => {
+            let mut bad = false;
+            for path in &archives {
+                match Archive::open(path).and_then(|a| a.verify()) {
+                    Ok(lines) => println!("{}: ok, {lines} lines", path.display()),
+                    Err(e) => {
+                        println!("{}: FAILED: {e}", path.display());
+                        bad = true;
+                    }
+                }
+            }
+            if bad {
+                return Ok(ExitCode::from(2));
+            }
         }
         Cmd::Stats { archive } => {
             let a = Archive::open(&archive)?;
