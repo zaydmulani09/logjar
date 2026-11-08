@@ -13,4 +13,4 @@ mod varint;
 pub use archive::{Archive, Index, Options, SegmentInfo, StreamInfo, StreamStats, Writer};
 pub use error::{Error, Result};
 pub use query::Query;
-pub use search::{Match, SearchStats};
+pub use search::{ArchiveStats, Match, SearchStats};

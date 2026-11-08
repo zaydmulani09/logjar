@@ -82,6 +82,8 @@ enum Cmd {
         #[arg(long)]
         stats: bool,
     },
+    /// Show where an archive's bytes go, block by block
+    Stats { archive: PathBuf },
     /// Show the distinct line templates (log types), most common first
     Templates {
         archive: PathBuf,
@@ -291,6 +293,32 @@ fn run(cli: Cli) -> Res<ExitCode> {
             } else {
                 ExitCode::from(1)
             });
+        }
+        Cmd::Stats { archive } => {
+            let a = Archive::open(&archive)?;
+            let st = a.stats()?;
+            let mut out = io::stdout().lock();
+            writeln!(
+                out,
+                "{} lines in {} segments: {} -> {} ({:.1}x)",
+                st.lines,
+                st.segments,
+                human(st.raw_bytes),
+                human(a.size()),
+                st.raw_bytes as f64 / a.size().max(1) as f64
+            )?;
+            writeln!(out, "{} template entries, {} dictionary entries", st.templates, st.dict_entries)?;
+            writeln!(out, "{:<8} {:>12} {:>12} {:>7} {:>7}", "block", "raw", "stored", "ratio", "share")?;
+            for (name, raw, comp) in st.blocks {
+                writeln!(
+                    out,
+                    "{name:<8} {:>12} {:>12} {:>6.1}x {:>6.1}%",
+                    human(raw),
+                    human(comp),
+                    raw as f64 / comp.max(1) as f64,
+                    100.0 * comp as f64 / st.stored_bytes.max(1) as f64
+                )?;
+            }
         }
         Cmd::Templates { archive, top } => {
             let a = Archive::open(&archive)?;

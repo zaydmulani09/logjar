@@ -28,6 +28,20 @@ pub struct Match {
     pub line: Vec<u8>,
 }
 
+/// Totals from [`Archive::stats`].
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveStats {
+    pub segments: u64,
+    pub lines: u64,
+    pub raw_bytes: u64,
+    pub stored_bytes: u64,
+    /// (block name, raw bytes, compressed bytes), summed over segments.
+    pub blocks: [(&'static str, u64, u64); segment::BLOCKS],
+    /// Template table entries, summed over segments (not distinct).
+    pub templates: u64,
+    pub dict_entries: u64,
+}
+
 /// Where a search spent (and saved) its effort.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchStats {
@@ -195,6 +209,29 @@ impl Archive {
         )?;
         st.matches = matches.len() as u64;
         Ok((matches, st))
+    }
+
+    /// Where the archive's bytes go: per-block raw and compressed totals,
+    /// plus template and dictionary counts. Inflates only `meta` and `dict`.
+    pub fn stats(&self) -> Result<ArchiveStats> {
+        let mut st = ArchiveStats::default();
+        for (i, info) in self.index().segments.iter().enumerate() {
+            let seg = self.read_segment(i)?;
+            st.segments += 1;
+            st.lines += info.lines;
+            st.raw_bytes += info.raw_bytes;
+            st.stored_bytes += info.len;
+            for (b, (raw, comp)) in seg.block_sizes().into_iter().enumerate() {
+                st.blocks[b].1 += raw as u64;
+                st.blocks[b].2 += comp as u64;
+            }
+            st.templates += seg.meta()?.templates.len() as u64;
+            st.dict_entries += seg.dict()?.len() as u64;
+        }
+        for (b, name) in segment::BLOCK_NAMES.iter().enumerate() {
+            st.blocks[b].0 = name;
+        }
+        Ok(st)
     }
 
     /// Every distinct template in the archive with its line count, most

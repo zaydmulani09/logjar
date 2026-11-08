@@ -25,7 +25,8 @@ use crate::timestamp::{self, Spec};
 use crate::varint::{self, Cursor};
 use crate::{Error, Result};
 
-const BLOCKS: usize = 5;
+pub const BLOCKS: usize = 5;
+pub const BLOCK_NAMES: [&str; BLOCKS] = ["meta", "dict", "events", "times", "vars"];
 const META: usize = 0;
 const DICT: usize = 1;
 const EVENTS: usize = 2;
@@ -347,6 +348,11 @@ impl Segment {
 
     pub fn vars(&self) -> Result<Vec<u8>> {
         self.inflate(VARS)
+    }
+
+    /// (raw, compressed) size of each block, in [`BLOCK_NAMES`] order.
+    pub fn block_sizes(&self) -> [(usize, usize); BLOCKS] {
+        self.blocks.map(|(_, len, raw)| (raw, len))
     }
 }
 
