@@ -33,6 +33,9 @@ enum Cmd {
         /// Encoder threads
         #[arg(short = 'j', long, default_value_t = Options::default().threads)]
         threads: usize,
+        /// Don't print the summary line
+        #[arg(short, long)]
+        quiet: bool,
         /// Stream name to use for stdin
         #[arg(long, default_value = "stdin")]
         name: String,
@@ -131,6 +134,7 @@ fn run(cli: Cli) -> Res<ExitCode> {
             level,
             segment_mb,
             threads,
+            quiet,
             name,
             inputs,
         } => {
@@ -158,13 +162,15 @@ fn run(cli: Cli) -> Res<ExitCode> {
             }
             w.finish()?;
             let size = std::fs::metadata(&output)?.len();
-            eprintln!(
-                "{}: {lines} lines, {} -> {} ({:.1}x)",
-                output.display(),
-                human(raw),
-                human(size),
-                raw as f64 / size.max(1) as f64
-            );
+            if !quiet {
+                eprintln!(
+                    "{}: {lines} lines, {} -> {} ({:.1}x)",
+                    output.display(),
+                    human(raw),
+                    human(size),
+                    raw as f64 / size.max(1) as f64
+                );
+            }
         }
         Cmd::Unpack { archive, dir } => {
             let a = Archive::open(&archive)?;
