@@ -66,6 +66,7 @@ impl Prog {
         let mut p = Parser {
             s: pattern.as_bytes(),
             i: 0,
+            ignore_case,
         };
         let start_anchor = p.eat(b'^');
         let ast = p.alt()?;
@@ -175,6 +176,9 @@ impl Prog {
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    /// Negated classes must fold case before negating (`[^a]` excludes `A`
+    /// too); everything else is folded once the automaton is built.
+    ignore_case: bool,
 }
 
 impl Parser<'_> {
@@ -378,6 +382,13 @@ impl Parser<'_> {
             }
         }
         if negate {
+            if self.ignore_case {
+                for b in b'a'..=b'z' {
+                    let either = set[b as usize] || set[b.to_ascii_uppercase() as usize];
+                    set[b as usize] = either;
+                    set[b.to_ascii_uppercase() as usize] = either;
+                }
+            }
             set.iter_mut().for_each(|x| *x = !*x);
         }
         Ok(set)
@@ -517,6 +528,9 @@ mod tests {
         assert!(m("[]x]", "]"));
         assert!(m("[a-]", "-"));
         assert!(Prog::regex("err", true).unwrap().is_match(b"ERROR"));
+        // Case-insensitive negation folds first: [^a] excludes A as well.
+        let neg = Prog::regex("^[^a1]$", true).unwrap();
+        assert!(!neg.is_match(b"A") && !neg.is_match(b"a") && neg.is_match(b"b"));
     }
 
     #[test]
