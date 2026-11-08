@@ -2,6 +2,7 @@
 
 mod error;
 mod message;
+mod segment;
 mod timestamp;
 mod varint;
 
