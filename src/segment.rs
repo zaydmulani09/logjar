@@ -167,10 +167,9 @@ impl Builder {
             varint::put_bytes(m, &t.bytes);
             varint::put_u64(m, t.rows);
             varint::put_u64(m, vars.len() as u64);
-            for col in &t.cols {
-                for &v in col {
-                    varint::put_u64(&mut vars, v);
-                }
+            let kinds = message::slots(&t.bytes).expect("template written by us");
+            for (col, kind) in t.cols.iter().zip(kinds) {
+                put_column(&mut vars, col, kind);
             }
         }
         raw[VARS] = vars;
@@ -356,6 +355,75 @@ impl Segment {
     }
 }
 
+// Column codecs. Each integer or dictionary column starts with a mode:
+// raw values, or deltas from the previous row. Deltas win on counters,
+// offsets and dictionary ids (which are handed out in first-seen order, so
+// a burst of lines about the same object references nearby ids).
+const RAW: u64 = 0;
+const DELTA: u64 = 1;
+
+/// Signed view of a stored value: ints are zigzagged, dictionary ids not.
+fn signed(v: u64, kind: Kind) -> i64 {
+    match kind {
+        Kind::Int => varint::unzigzag(v),
+        _ => v as i64,
+    }
+}
+
+fn unsigned(v: i64, kind: Kind) -> u64 {
+    match kind {
+        Kind::Int => varint::zigzag(v),
+        _ => v as u64,
+    }
+}
+
+fn varint_len(v: u64) -> usize {
+    (64 - v.leading_zeros() as usize).max(1).div_ceil(7)
+}
+
+fn put_column(out: &mut Vec<u8>, col: &[u64], kind: Kind) {
+    if kind == Kind::Float {
+        col.iter().for_each(|&v| varint::put_u64(out, v));
+        return;
+    }
+    let deltas: Vec<u64> = col
+        .iter()
+        .scan(0i64, |prev, &v| {
+            let s = signed(v, kind);
+            let d = s.wrapping_sub(*prev);
+            *prev = s;
+            Some(varint::zigzag(d))
+        })
+        .collect();
+    let cost = |c: &[u64]| c.iter().map(|&v| varint_len(v)).sum::<usize>();
+    let (mode, vals) = if cost(&deltas) < cost(col) {
+        (DELTA, &deltas[..])
+    } else {
+        (RAW, col)
+    };
+    varint::put_u64(out, mode);
+    vals.iter().for_each(|&v| varint::put_u64(out, v));
+}
+
+fn get_column(c: &mut Cursor<'_>, rows: usize, kind: Kind) -> Result<Vec<u64>> {
+    if kind == Kind::Float {
+        return (0..rows * 2).map(|_| c.u64()).collect();
+    }
+    match c.u64()? {
+        RAW => (0..rows).map(|_| c.u64()).collect(),
+        DELTA => {
+            let mut prev = 0i64;
+            (0..rows)
+                .map(|_| {
+                    prev = prev.wrapping_add(c.i64()?);
+                    Ok(unsigned(prev, kind))
+                })
+                .collect()
+        }
+        _ => Err(Error::Corrupt("column mode")),
+    }
+}
+
 /// Reads one template's variables out of the `vars` block: one column per
 /// slot, floats as (value, meta) pairs.
 pub fn template_columns(vars: &[u8], t: &Template) -> Result<Vec<Vec<u64>>> {
@@ -366,10 +434,7 @@ pub fn template_columns(vars: &[u8], t: &Template) -> Result<Vec<Vec<u64>>> {
     let rows = usize::try_from(t.rows).map_err(|_| Error::Corrupt("rows"))?;
     t.slots
         .iter()
-        .map(|k| {
-            let n = if *k == Kind::Float { rows * 2 } else { rows };
-            (0..n).map(|_| c.u64()).collect()
-        })
+        .map(|&k| get_column(&mut c, rows, k))
         .collect()
 }
 
