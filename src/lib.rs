@@ -3,6 +3,7 @@
 mod archive;
 mod error;
 mod message;
+mod par;
 mod query;
 mod search;
 mod segment;

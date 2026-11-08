@@ -14,7 +14,7 @@ use crate::archive::Archive;
 use crate::message::{self, Kind};
 use crate::query::{DictStates, Nfa, Query};
 use crate::segment::{self, Segment};
-use crate::{timestamp, Error, Result};
+use crate::{par, timestamp, Error, Result};
 
 /// One matching line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +63,22 @@ impl Archive {
     /// ids (empty = all).
     pub fn search(&self, q: &Query, streams: &[u32], mut f: impl FnMut(Match) -> bool) -> Result<SearchStats> {
         let mut total = SearchStats::default();
-        for (i, base) in self.line_bases().into_iter().enumerate() {
-            let (matches, stats) = self.search_segment(i, base, q, streams)?;
-            total.add(&stats);
-            for m in matches {
-                if !f(m) {
-                    return Ok(total);
+        let bases = self.line_bases();
+        let threads = par::default_threads();
+        let ids: Vec<usize> = (0..bases.len()).collect();
+        // Parallel waves, each emitted in order before the next starts; that
+        // bounds buffered matches and lets `f` stop the search early.
+        // ponytail: a wave waits for its slowest segment; a sliding reorder
+        // window would keep every thread busy if profiles ever show it.
+        for wave in ids.chunks(threads * 2) {
+            let results = par::map(wave, threads, |&i| self.search_segment(i, bases[i], q, streams));
+            for r in results {
+                let (matches, stats) = r?;
+                total.add(&stats);
+                for m in matches {
+                    if !f(m) {
+                        return Ok(total);
+                    }
                 }
             }
         }
