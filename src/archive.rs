@@ -419,6 +419,22 @@ impl Archive {
 
     /// Writes the exact original bytes of one stream.
     pub fn write_stream(&self, stream: u32, out: &mut impl Write) -> Result<()> {
+        let mut r = self.stream_reader(stream)?;
+        // Decode errors travel through io::copy wrapped in io::Error; unwrap
+        // them so callers still see Error::Corrupt rather than Error::Io.
+        std::io::copy(&mut r, out).map_err(|e| {
+            if e.get_ref().is_some_and(|inner| inner.is::<Error>()) {
+                *e.into_inner().unwrap().downcast::<Error>().unwrap()
+            } else {
+                Error::Io(e)
+            }
+        })?;
+        Ok(())
+    }
+
+    /// The original bytes of one stream as a reader, decoded one segment
+    /// at a time.
+    pub fn stream_reader(&self, stream: u32) -> Result<StreamReader<'_>> {
         let info = self
             .index
             .streams
@@ -427,21 +443,69 @@ impl Archive {
         let segs: Vec<usize> = (0..self.index.segments.len())
             .filter(|&i| self.index.segments[i].stream == stream)
             .collect();
-        let total: u64 = segs.iter().map(|&i| self.index.segments[i].lines).sum();
-        let mut written = 0u64;
-        for i in segs {
-            let seg = self.read_segment(i)?;
-            let lines = self.index.segments[i].lines as usize;
-            segment::decode_all(&seg, lines, |line| {
-                written += 1;
-                out.write_all(line)?;
-                if !(info.unterminated && written == total) {
-                    out.write_all(b"\n")?;
-                }
-                Ok(())
-            })?;
+        Ok(StreamReader {
+            archive: self,
+            segs,
+            next: 0,
+            buf: Vec::new(),
+            pos: 0,
+            unterminated: info.unterminated,
+        })
+    }
+}
+
+/// Reads a stream's original bytes. See [`Archive::stream_reader`].
+pub struct StreamReader<'a> {
+    archive: &'a Archive,
+    segs: Vec<usize>,
+    next: usize,
+    buf: Vec<u8>,
+    pos: usize,
+    unterminated: bool,
+}
+
+impl StreamReader<'_> {
+    fn refill(&mut self) -> Result<()> {
+        self.buf.clear();
+        self.pos = 0;
+        let Some(&i) = self.segs.get(self.next) else {
+            return Ok(());
+        };
+        self.next += 1;
+        let seg = self.archive.read_segment(i)?;
+        let lines = self.archive.index.segments[i].lines as usize;
+        let buf = &mut self.buf;
+        segment::decode_all(&seg, lines, |line| {
+            buf.extend_from_slice(line);
+            buf.push(b'\n');
+            Ok(())
+        })?;
+        if self.unterminated && self.next == self.segs.len() {
+            self.buf.pop();
         }
         Ok(())
+    }
+}
+
+impl Read for StreamReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.fill_buf()?.len().min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+impl BufRead for StreamReader<'_> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        while self.pos >= self.buf.len() && self.next < self.segs.len() {
+            self.refill().map_err(std::io::Error::other)?;
+        }
+        Ok(&self.buf[self.pos.min(self.buf.len())..])
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.pos += n;
     }
 }
 
