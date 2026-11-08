@@ -208,7 +208,12 @@ fn run(cli: Cli) -> Res<ExitCode> {
                 Writer::create(&output, opts)?
             };
             let (mut raw, mut lines) = (0u64, 0u64);
+            // Never read the archive being written (e.g. `-o logs/a.ljar logs`).
+            let me = std::fs::canonicalize(&output).ok();
             for input in &expand_inputs(inputs)? {
+                if me.is_some() && std::fs::canonicalize(input).ok() == me {
+                    continue;
+                }
                 let stats = if input.as_os_str() == "-" {
                     w.add_stream(&name, io::stdin().lock())?
                 } else {
@@ -636,6 +641,10 @@ fn json_str(b: &[u8]) -> String {
 fn expand_inputs(inputs: Vec<PathBuf>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     for input in inputs {
+        if input.is_dir() {
+            walk(&input, &mut out)?;
+            continue;
+        }
         let name = input.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if input.exists() || !(name.contains('*') || name.contains('?')) {
             out.push(input);
@@ -673,6 +682,22 @@ fn expand_inputs(inputs: Vec<PathBuf>) -> Result<Vec<PathBuf>, Box<dyn std::erro
         out.append(&mut hits);
     }
     Ok(out)
+}
+
+/// Every file under `dir`, depth first, in sorted order. Symlinks are not
+/// followed.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<io::Result<_>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let t = e.file_type()?;
+        if t.is_dir() {
+            walk(&e.path(), out)?;
+        } else if t.is_file() {
+            out.push(e.path());
+        }
+    }
+    Ok(())
 }
 
 /// Stream names are relative, forward-slashed paths, so archives made on

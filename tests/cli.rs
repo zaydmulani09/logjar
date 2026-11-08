@@ -255,6 +255,26 @@ fn pack_expands_wildcards_itself() {
     assert_eq!(streams, ["sys/auth.log", "sys/kern.log", "app.log"]);
     let o = run(&["pack", "-q", "-o", "x.ljar", "nothing/*.log"], &d);
     assert_eq!(o.status.code(), Some(2));
+
+    // Directories are packed recursively and unpack to the same tree.
+    std::fs::create_dir_all(d.join("sys/old")).unwrap();
+    std::fs::write(d.join("sys/old/auth.log.1"), "rotated\n").unwrap();
+    // The archive itself sits inside the packed directory and is skipped.
+    let o = run(&["pack", "-q", "-o", "sys/dir.ljar", "sys"], &d);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    std::fs::rename(d.join("sys/dir.ljar"), d.join("dir.ljar")).unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(run(&["unpack", "dir.ljar", "-C", "out"], &d)
+        .status
+        .success());
+    assert!(!d.join("out/sys/dir.ljar").exists());
+    for f in ["auth.log", "kern.log", "notes.txt", "old/auth.log.1"] {
+        assert_eq!(
+            std::fs::read(d.join("out/sys").join(f)).unwrap(),
+            std::fs::read(d.join("sys").join(f)).unwrap(),
+            "{f}"
+        );
+    }
 }
 
 #[test]
