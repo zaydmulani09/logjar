@@ -215,10 +215,16 @@ fn ingest_then_compact() {
 #[test]
 fn grep_alternatives_inversion_and_json() {
     let d = setup("grep2");
-    let o = stdout(&run(&["grep", "-c", "-e", "ERROR", "-e", "WARN", "a.ljar"], &d));
+    let o = stdout(&run(
+        &["grep", "-c", "-e", "ERROR", "-e", "WARN", "a.ljar"],
+        &d,
+    ));
     assert_eq!(o, "2\n");
     // 8 lines total, 6 contain "2015" or "Jun"-prefixed sshd lines contain "combo".
-    let o = stdout(&run(&["grep", "-c", "-v", "-e", "2015", "-e", "combo", "a.ljar"], &d));
+    let o = stdout(&run(
+        &["grep", "-c", "-v", "-e", "2015", "-e", "combo", "a.ljar"],
+        &d,
+    ));
     assert_eq!(o, "1\n"); // the stack-trace line
     let o = stdout(&run(&["grep", "--json", "Slow GC", "a.ljar"], &d));
     assert_eq!(
@@ -226,5 +232,19 @@ fn grep_alternatives_inversion_and_json() {
         "{\"stream\":\"app.log\",\"line\":4,\"time_ns\":1445191770001000000,\"text\":\"2015-10-18 18:09:30,001 WARN [main] Slow GC pause 412.7 ms\"}\n"
     );
     let o = stdout(&run(&["grep", "--json", "Client.java", "a.ljar"], &d));
-    assert!(o.contains("\"time_ns\":null") && o.contains("\"text\":\"\\tat org"), "{o}");
+    assert!(
+        o.contains("\"time_ns\":null") && o.contains("\"text\":\"\\tat org"),
+        "{o}"
+    );
+}
+
+#[test]
+fn cat_time_slice() {
+    let d = setup("slice");
+    let o = stdout(&run(&["cat", "a.ljar", "--after", "2015-10-18 18:05", "--before", "2015-10-18 18:12"], &d));
+    assert_eq!(
+        o,
+        "2015-10-18 18:05:12,100 ERROR [RMCommunicator] Failed to contact 10.86.169.121:8030 after 3 retries\n\
+         2015-10-18 18:09:30,001 WARN [main] Slow GC pause 412.7 ms\n"
+    );
 }

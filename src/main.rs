@@ -89,6 +89,13 @@ enum Cmd {
         /// Only these streams (default: all, in order)
         #[arg(short, long)]
         stream: Vec<String>,
+        /// Only lines at or after this time; segments outside the window are
+        /// never read
+        #[arg(long)]
+        after: Option<String>,
+        /// Only lines before this time
+        #[arg(long)]
+        before: Option<String>,
     },
     /// List the streams in an archive
     Ls { archive: PathBuf },
@@ -274,7 +281,12 @@ fn run(cli: Cli) -> Res<ExitCode> {
                 out.flush()?;
             }
         }
-        Cmd::Cat { archive, stream } => {
+        Cmd::Cat {
+            archive,
+            stream,
+            after,
+            before,
+        } => {
             let a = Archive::open(&archive)?;
             let ids: Vec<u32> = if stream.is_empty() {
                 (0..a.index().streams.len() as u32).collect()
@@ -288,8 +300,32 @@ fn run(cli: Cli) -> Res<ExitCode> {
                     .collect::<Result<_, _>>()?
             };
             let mut out = BufWriter::with_capacity(1 << 16, io::stdout().lock());
-            for id in ids {
-                a.write_stream(id, &mut out)?;
+            if after.is_some() || before.is_some() {
+                // A time slice is a search for everything inside the window.
+                let mut q = Query::new("")?;
+                if let Some(t) = after {
+                    q = q.after(Query::parse_time(&t)?);
+                }
+                if let Some(t) = before {
+                    q = q.before(Query::parse_time(&t)?);
+                }
+                let mut err = None;
+                a.search(&q, &ids, |m| {
+                    match out.write_all(&m.line).and_then(|_| out.write_all(b"\n")) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            err = Some(e);
+                            false
+                        }
+                    }
+                })?;
+                if let Some(e) = err {
+                    return Err(e.into());
+                }
+            } else {
+                for id in ids {
+                    a.write_stream(id, &mut out)?;
+                }
             }
             out.flush()?;
         }
