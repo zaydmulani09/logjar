@@ -1,7 +1,9 @@
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use logjar::{Archive, Options, Query, Writer};
@@ -41,6 +43,38 @@ enum Cmd {
         name: String,
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
+    },
+    /// Append lines from stdin as they arrive, checkpointing so the archive
+    /// stays searchable and crash-safe (e.g. `tail -F app.log | logjar ingest -o app.ljar`)
+    Ingest {
+        /// Archive to create or append to
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Stream name for the lines
+        #[arg(long, default_value = "stdin")]
+        name: String,
+        /// Checkpoint at least this often while lines arrive
+        #[arg(long, default_value_t = 5)]
+        flush_secs: u64,
+        /// Checkpoint whenever this many MiB are buffered
+        #[arg(long, default_value_t = 32)]
+        flush_mb: usize,
+        /// zstd level (1-22)
+        #[arg(short, long, default_value_t = Options::default().level)]
+        level: i32,
+    },
+    /// Rewrite an archive into fewer, larger segments (e.g. after ingest)
+    Compact {
+        archive: PathBuf,
+        /// Write here instead of replacing the archive
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// zstd level (1-22)
+        #[arg(short, long, default_value_t = Options::default().level)]
+        level: i32,
+        /// Target uncompressed size of each segment, in MiB
+        #[arg(long, default_value_t = Options::default().segment_bytes >> 20)]
+        segment_mb: usize,
     },
     /// Restore the original files into a directory
     Unpack {
@@ -171,6 +205,48 @@ fn run(cli: Cli) -> Res<ExitCode> {
                     raw as f64 / size.max(1) as f64
                 );
             }
+        }
+        Cmd::Ingest {
+            output,
+            name,
+            flush_secs,
+            flush_mb,
+            level,
+        } => ingest(
+            &output,
+            &name,
+            Duration::from_secs(flush_secs.max(1)),
+            flush_mb.max(1) << 20,
+            level,
+        )?,
+        Cmd::Compact {
+            archive,
+            output,
+            level,
+            segment_mb,
+        } => {
+            let opts = Options {
+                level,
+                segment_bytes: segment_mb.max(1) << 20,
+                ..Options::default()
+            };
+            let target = output
+                .clone()
+                .unwrap_or_else(|| archive.with_extension("ljar.compacting"));
+            let before = std::fs::metadata(&archive)?.len();
+            {
+                let a = Archive::open(&archive)?;
+                let mut w = Writer::create(&target, opts)?;
+                for (i, s) in a.index().streams.iter().enumerate() {
+                    w.add_stream(&s.name, a.stream_reader(i as u32)?)?;
+                }
+                w.finish()?;
+            }
+            if output.is_none() {
+                std::fs::rename(&target, &archive)?;
+            }
+            let after = std::fs::metadata(output.as_ref().unwrap_or(&archive))?.len();
+            eprintln!("{} -> {}", human(before), human(after));
         }
         Cmd::Unpack { archive, dir } => {
             let a = Archive::open(&archive)?;
@@ -366,6 +442,64 @@ fn run(cli: Cli) -> Res<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Reads stdin on a thread so checkpoints can happen on a timer even when
+/// no line arrives. At most `flush` worth of lines is lost if killed.
+fn ingest(output: &Path, name: &str, flush: Duration, flush_bytes: usize, level: i32) -> Res<()> {
+    let opts = Options {
+        level,
+        ..Options::default()
+    };
+    let mut w = if output.exists() {
+        Writer::append(output, opts)?
+    } else {
+        Writer::create(output, opts)?
+    };
+    let (tx, rx) = mpsc::sync_channel::<io::Result<Vec<u8>>>(4096);
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            let r = stdin.read_until(b'\n', &mut line);
+            let done = !matches!(r, Ok(n) if n > 0);
+            let msg = match r {
+                Ok(0) => break,
+                Ok(_) => Ok(line),
+                Err(e) => Err(e),
+            };
+            if tx.send(msg).is_err() || done {
+                break;
+            }
+        }
+    });
+    let mut chunk = Vec::new();
+    let mut since: Option<Instant> = None;
+    loop {
+        let wait = since.map_or(Duration::from_secs(3600), |t| {
+            flush.saturating_sub(t.elapsed())
+        });
+        let (flush_now, eof) = match rx.recv_timeout(wait) {
+            Ok(line) => {
+                chunk.extend_from_slice(&line?);
+                since.get_or_insert_with(Instant::now);
+                (chunk.len() >= flush_bytes, false)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => (true, false),
+            Err(mpsc::RecvTimeoutError::Disconnected) => (true, true),
+        };
+        if flush_now && !chunk.is_empty() {
+            w.add_stream(name, &chunk[..])?;
+            w.checkpoint()?;
+            chunk.clear();
+            since = None;
+        }
+        if eof {
+            break;
+        }
+    }
+    w.finish()?;
+    Ok(())
 }
 
 /// Stream names use forward slashes so archives made on Windows unpack the

@@ -176,3 +176,30 @@ fn corrupt_input_is_a_clean_error() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("corrupt"));
 }
+
+#[test]
+fn ingest_then_compact() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let d = dir("ingest");
+    for round in 0..2 {
+        let mut child = bin()
+            .args(["ingest", "-o", "live.ljar", "--name", "svc"])
+            .current_dir(&d)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        for i in 0..100 {
+            writeln!(stdin, "2024-05-01 12:00:{:02} INFO round {round} request {i} ok", i % 60).unwrap();
+        }
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+    }
+    assert_eq!(stdout(&run(&["grep", "-c", "request 7 ok", "live.ljar"], &d)), "2\n");
+    let before = stdout(&run(&["cat", "live.ljar"], &d));
+    assert_eq!(before.lines().count(), 200);
+    assert!(run(&["compact", "live.ljar"], &d).status.success());
+    assert_eq!(stdout(&run(&["cat", "live.ljar"], &d)), before);
+    assert!(stdout(&run(&["stats", "live.ljar"], &d)).contains("in 1 segments"));
+}
