@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        run: |
+          name=logjar-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir "$name"
+          cp README.md LICENSE "$name"/
+          if [ "${{ runner.os }}" = Windows ]; then
+            cp target/${{ matrix.target }}/release/logjar.exe "$name"/
+            7z a "$name.zip" "$name" >/dev/null
+            echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+          else
+            cp target/${{ matrix.target }}/release/logjar "$name"/
+            tar czf "$name.tar.gz" "$name"
+            echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true
