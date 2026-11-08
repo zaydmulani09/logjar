@@ -241,10 +241,35 @@ fn grep_alternatives_inversion_and_json() {
 #[test]
 fn cat_time_slice() {
     let d = setup("slice");
-    let o = stdout(&run(&["cat", "a.ljar", "--after", "2015-10-18 18:05", "--before", "2015-10-18 18:12"], &d));
+    let o = stdout(&run(
+        &[
+            "cat",
+            "a.ljar",
+            "--after",
+            "2015-10-18 18:05",
+            "--before",
+            "2015-10-18 18:12",
+        ],
+        &d,
+    ));
     assert_eq!(
         o,
         "2015-10-18 18:05:12,100 ERROR [RMCommunicator] Failed to contact 10.86.169.121:8030 after 3 retries\n\
          2015-10-18 18:09:30,001 WARN [main] Slow GC pause 412.7 ms\n"
     );
+}
+
+#[test]
+fn pack_reads_gzip_input() {
+    use std::io::Write;
+    let d = dir("gzip");
+    let f = std::fs::File::create(d.join("old.log.gz")).unwrap();
+    let mut gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+    gz.write_all(APP.as_bytes()).unwrap();
+    gz.finish().unwrap();
+    assert!(run(&["pack", "-q", "-o", "g.ljar", "old.log.gz"], &d)
+        .status
+        .success());
+    assert!(stdout(&run(&["ls", "g.ljar"], &d)).contains(" old.log\n"));
+    assert_eq!(stdout(&run(&["cat", "g.ljar"], &d)), APP);
 }

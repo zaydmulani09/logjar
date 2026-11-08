@@ -210,7 +210,20 @@ fn run(cli: Cli) -> Res<ExitCode> {
                     w.add_stream(&name, io::stdin().lock())?
                 } else {
                     let f = File::open(input).map_err(|e| format!("{}: {e}", input.display()))?;
-                    w.add_stream(&stream_name(input), BufReader::with_capacity(1 << 20, f))?
+                    let mut r = BufReader::with_capacity(1 << 20, f);
+                    // Rotated logs are often gzipped: detect by magic bytes,
+                    // decompress on the fly and drop the .gz from the name.
+                    if r.fill_buf()?.starts_with(&[0x1f, 0x8b]) {
+                        let name = stream_name(input);
+                        let name = name.strip_suffix(".gz").unwrap_or(&name);
+                        let gz = BufReader::with_capacity(
+                            1 << 20,
+                            flate2::bufread::MultiGzDecoder::new(r),
+                        );
+                        w.add_stream(name, gz)?
+                    } else {
+                        w.add_stream(&stream_name(input), r)?
+                    }
                 };
                 raw += stats.raw_bytes;
                 lines += stats.lines;
@@ -609,10 +622,18 @@ fn json_str(b: &[u8]) -> String {
     out
 }
 
-/// Stream names use forward slashes so archives made on Windows unpack the
-/// same way everywhere.
+/// Stream names are relative, forward-slashed paths, so archives made on
+/// Windows unpack the same way everywhere. Like tar, drive prefixes, roots
+/// and `..` are dropped: `C:\logs\..\app.log` is stored as `logs/app.log`.
 fn stream_name(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
+    let parts: Vec<String> = p
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    parts.join("/")
 }
 
 /// Stream names come from the archive, which may be untrusted: refuse
@@ -640,5 +661,21 @@ fn human(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_names_are_relative() {
+        assert_eq!(stream_name(Path::new("a/b.log")), "a/b.log");
+        assert_eq!(stream_name(Path::new("./a/../b.log")), "a/b.log");
+        assert_eq!(stream_name(Path::new("/var/log/syslog")), "var/log/syslog");
+        if cfg!(windows) {
+            assert_eq!(stream_name(Path::new(r"C:\logs\app.log")), "logs/app.log");
+        }
+        assert!(safe_relative(&stream_name(Path::new("/x/../../y"))).is_ok());
     }
 }
