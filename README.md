@@ -57,13 +57,17 @@ row is checked to round-trip byte for byte.
 | OpenStack (normal2) | 38.6 MiB | 12.4x | 16.1x | 16.7x | **20.4x** | 1.6s |
 | Hadoop | 46.3 MiB | 20.5x | 38.1x | 42.8x | **93.5x** | 1.7s |
 | SSH | 70.0 MiB | 16.8x | 20.3x | 24.6x | **95.5x** | 2.0s |
+| BGL | 708.8 MiB | 12.9x | 22.9x | 21.7x | **25.6x** | 10.0s |
 <!-- BENCH-LARGE -->
 
 Windows 11, 8 threads (the default). Pack time includes reading the input.
 `-l 19` gets HDFS from 52.2 MiB down to 47.9 MiB, at about twice the pack time.
 
-Weakest case: OpenStack, where much of each line is UUIDs and request ids
-that don't repeat, so there's less structure to exploit.
+Weakest cases: OpenStack, where much of each line is UUIDs and request ids
+that never repeat, and BGL, where every line carries a second,
+microsecond-precision timestamp in the middle
+(`2005-06-03-15.42.50.675872`). logjar only parses timestamps at the start
+of a line, so each of those becomes a one-off dictionary entry.
 
 ## Search
 
@@ -99,6 +103,7 @@ x86_64 and arm64, macOS arm64, Windows x86_64).
 
 ```sh
 logjar pack -o app.ljar /var/log/app/*.log    # .gz inputs are detected and decompressed
+logjar pack -o logs.ljar C:\logs               # directories are packed recursively
 logjar pack -a -o app.ljar new.log             # append; continues existing streams
 logjar ls app.ljar                             # streams, lines, sizes
 
@@ -121,7 +126,9 @@ logjar verify app.ljar                         # decode everything, check checks
 
 `grep` follows grep's conventions: exit status 0 if anything matched, 1 if
 nothing, 2 on error. Lines are prefixed with the stream name when more than
-one stream is searched.
+one stream is searched. With CRLF logs, `$` matches before the `\r`, as with
+`rg --crlf`. Wildcards in file arguments are expanded by logjar itself, so
+they work in cmd.exe and PowerShell.
 
 ### As a library
 
