@@ -61,7 +61,12 @@ impl Archive {
     /// Calls `f` with every matching line, in archive order. `f` returns
     /// `false` to stop early. `streams` limits the search to those stream
     /// ids (empty = all).
-    pub fn search(&self, q: &Query, streams: &[u32], mut f: impl FnMut(Match) -> bool) -> Result<SearchStats> {
+    pub fn search(
+        &self,
+        q: &Query,
+        streams: &[u32],
+        mut f: impl FnMut(Match) -> bool,
+    ) -> Result<SearchStats> {
         let mut total = SearchStats::default();
         let bases = self.line_bases();
         let threads = par::default_threads();
@@ -71,7 +76,9 @@ impl Archive {
         // ponytail: a wave waits for its slowest segment; a sliding reorder
         // window would keep every thread busy if profiles ever show it.
         for wave in ids.chunks(threads * 2) {
-            let results = par::map(wave, threads, |&i| self.search_segment(i, bases[i], q, streams));
+            let results = par::map(wave, threads, |&i| {
+                self.search_segment(i, bases[i], q, streams)
+            });
             for r in results {
                 let (matches, stats) = r?;
                 total.add(&stats);
@@ -107,7 +114,11 @@ impl Archive {
         streams: &[u32],
     ) -> Result<(Vec<Match>, SearchStats)> {
         let info = &self.index().segments[i];
-        let mut st = SearchStats { segments: 1, lines_total: info.lines, ..Default::default() };
+        let mut st = SearchStats {
+            segments: 1,
+            lines_total: info.lines,
+            ..Default::default()
+        };
         let in_window = match info.time_range {
             _ if !q.has_time_filter() => true,
             Some((lo, hi)) => q.range_ok(lo, hi),
@@ -122,32 +133,37 @@ impl Archive {
         let meta = seg.meta()?;
         st.templates = meta.templates.len() as u64;
         let mut dict: Option<Vec<Vec<u8>>> = None;
-        let candidates: Vec<bool> = match Nfa::new(q, &meta.specs).filter(|_| !q.matches_everything()) {
-            None => vec![true; meta.templates.len()],
-            Some(nfa) => {
-                let mut out = Vec::with_capacity(meta.templates.len());
-                let mut coarse = Vec::new();
-                for t in &meta.templates {
-                    let pieces = message::pieces(&t.bytes)?;
-                    let ok = nfa.template_may_match(&pieces, None);
-                    out.push(ok);
-                    coarse.push(pieces);
-                }
-                // Refine survivors that have dictionary slots against the
-                // segment's real dictionary values.
-                let needs_dict = meta.templates.iter().zip(&out).any(|(t, &ok)| ok && t.slots.contains(&Kind::Dict));
-                if needs_dict {
-                    let d = dict.insert(seg.dict()?);
-                    let mut states = DictStates::new(d);
-                    for (j, t) in meta.templates.iter().enumerate() {
-                        if out[j] && t.slots.contains(&Kind::Dict) {
-                            out[j] = nfa.template_may_match(&coarse[j], Some(&mut states));
+        let candidates: Vec<bool> =
+            match Nfa::new(q, &meta.specs).filter(|_| !q.matches_everything()) {
+                None => vec![true; meta.templates.len()],
+                Some(nfa) => {
+                    let mut out = Vec::with_capacity(meta.templates.len());
+                    let mut coarse = Vec::new();
+                    for t in &meta.templates {
+                        let pieces = message::pieces(&t.bytes)?;
+                        let ok = nfa.template_may_match(&pieces, None);
+                        out.push(ok);
+                        coarse.push(pieces);
+                    }
+                    // Refine survivors that have dictionary slots against the
+                    // segment's real dictionary values.
+                    let needs_dict = meta
+                        .templates
+                        .iter()
+                        .zip(&out)
+                        .any(|(t, &ok)| ok && t.slots.contains(&Kind::Dict));
+                    if needs_dict {
+                        let d = dict.insert(seg.dict()?);
+                        let mut states = DictStates::new(d);
+                        for (j, t) in meta.templates.iter().enumerate() {
+                            if out[j] && t.slots.contains(&Kind::Dict) {
+                                out[j] = nfa.template_may_match(&coarse[j], Some(&mut states));
+                            }
                         }
                     }
+                    out
                 }
-                out
-            }
-        };
+            };
         st.templates_matched = candidates.iter().filter(|&&c| c).count() as u64;
         if st.templates_matched == 0 {
             st.segments_skipped_templates = 1;
@@ -158,18 +174,25 @@ impl Archive {
             Some(d) => d,
             None => seg.dict()?,
         };
-        let matches = decode_candidates(&seg, info.lines as usize, &meta, &dict, &candidates, |line_no, ts, line| {
-            st.lines_decoded += 1;
-            if q.has_time_filter() && !ts.is_some_and(|ns| q.time_ok(ns)) {
-                return None;
-            }
-            q.is_match(line).then(|| Match {
-                stream: info.stream,
-                line_number: line_base + line_no as u64 + 1,
-                timestamp: ts,
-                line: line.to_vec(),
-            })
-        })?;
+        let matches = decode_candidates(
+            &seg,
+            info.lines as usize,
+            &meta,
+            &dict,
+            &candidates,
+            |line_no, ts, line| {
+                st.lines_decoded += 1;
+                if q.has_time_filter() && !ts.is_some_and(|ns| q.time_ok(ns)) {
+                    return None;
+                }
+                q.is_match(line).then(|| Match {
+                    stream: info.stream,
+                    line_number: line_base + line_no as u64 + 1,
+                    timestamp: ts,
+                    line: line.to_vec(),
+                })
+            },
+        )?;
         st.matches = matches.len() as u64;
         Ok((matches, st))
     }
@@ -221,7 +244,10 @@ fn decode_candidates<T>(
         line.clear();
         let mut ts = None;
         if spec != 0 {
-            let s = meta.specs.get(spec as usize - 1).ok_or(Error::Corrupt("spec id"))?;
+            let s = meta
+                .specs
+                .get(spec as usize - 1)
+                .ok_or(Error::Corrupt("spec id"))?;
             timestamp::format(s, value, &mut line)?;
             ts = s.has_year.then(|| s.to_nanos(value));
         }
@@ -247,10 +273,25 @@ mod tests {
         let p = std::env::temp_dir().join(format!("logjar-search-{}.ljar", std::process::id()));
         let mut text = String::new();
         for i in 0..5000 {
-            let ts = format!("2015-10-18 18:{:02}:{:02},{:03}", (i / 60) % 60, i % 60, i % 1000);
+            let ts = format!(
+                "2015-10-18 18:{:02}:{:02},{:03}",
+                (i / 60) % 60,
+                i % 60,
+                i % 1000
+            );
             let line = match i % 7 {
-                0 => format!("{ts} ERROR [main] Failed to fetch blk_{} after {} retries", i * 31 % 997, i % 5),
-                1 => format!("{ts} INFO Received block blk_{} of size {} from /10.0.{}.{}", i, 1 << (i % 27), i % 256, i % 7),
+                0 => format!(
+                    "{ts} ERROR [main] Failed to fetch blk_{} after {} retries",
+                    i * 31 % 997,
+                    i % 5
+                ),
+                1 => format!(
+                    "{ts} INFO Received block blk_{} of size {} from /10.0.{}.{}",
+                    i,
+                    1 << (i % 27),
+                    i % 256,
+                    i % 7
+                ),
                 2 => format!("{ts} WARN GC pause {}.{:03} ms", i % 300, i % 1000),
                 3 => format!("plain line without timestamp #{i}"),
                 _ => format!("{ts} INFO heartbeat ok node-{:x}", i % 64),
@@ -258,24 +299,43 @@ mod tests {
             text.push_str(&line);
             text.push('\n');
         }
-        let mut w = Writer::create(&p, Options { segment_lines: 700, ..Options::default() }).unwrap();
+        let mut w = Writer::create(
+            &p,
+            Options {
+                segment_lines: 700,
+                ..Options::default()
+            },
+        )
+        .unwrap();
         w.add_stream("app.log", text.as_bytes()).unwrap();
         w.finish().unwrap();
         let a = Archive::open(&p).unwrap();
 
         let queries = [
-            "ERROR", "blk_42 ", "blk_42", "size 4096 ", "GC pause 1?.0", "node-3f", "#4999",
-            "18:05:0", "10.0.9.", "*retries", "nothing-like-this", "Received*from /10.0.1.1", "",
+            "ERROR",
+            "blk_42 ",
+            "blk_42",
+            "size 4096 ",
+            "GC pause 1?.0",
+            "node-3f",
+            "#4999",
+            "18:05:0",
+            "10.0.9.",
+            "*retries",
+            "nothing-like-this",
+            "Received*from /10.0.1.1",
+            "",
         ];
         for pat in queries {
             for ic in [false, true] {
                 let q = Query::new(pat).unwrap().ignore_case(ic);
                 let mut got = Vec::new();
-                let stats = a.search(&q, &[], |m| {
-                    got.push(m.line_number);
-                    true
-                })
-                .unwrap();
+                let stats = a
+                    .search(&q, &[], |m| {
+                        got.push(m.line_number);
+                        true
+                    })
+                    .unwrap();
                 let want: Vec<u64> = text
                     .lines()
                     .enumerate()
@@ -301,7 +361,10 @@ mod tests {
         let mut n = 0;
         a.search(&q, &[], |m| {
             let l = String::from_utf8(m.line).unwrap();
-            assert!(l.as_str() >= "2015-10-18 18:10" && l.as_str() < "2015-10-18 18:20", "{l}");
+            assert!(
+                l.as_str() >= "2015-10-18 18:10" && l.as_str() < "2015-10-18 18:20",
+                "{l}"
+            );
             n += 1;
             true
         })

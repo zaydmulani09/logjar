@@ -30,16 +30,6 @@ pub enum Kind {
     Dict,
 }
 
-impl Kind {
-    pub fn placeholder(self) -> u8 {
-        match self {
-            Kind::Int => PH_INT,
-            Kind::Float => PH_FLOAT,
-            Kind::Dict => PH_DICT,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Var<'a> {
     Int(i64),
@@ -53,7 +43,7 @@ pub enum Var<'a> {
 /// numbers and UUIDs whole.
 #[inline]
 pub fn is_delim(b: u8) -> bool {
-    b < 0x20 || b == b' ' || b == 0x7f || (b.is_ascii_punctuation() && !matches!(b, b'.' | b'-' | b'_' | b'+'))
+    b <= b' ' || b == 0x7f || (b.is_ascii_punctuation() && !matches!(b, b'.' | b'-' | b'_' | b'+'))
 }
 
 /// `-?(0|[1-9][0-9]*)` that fits an i64. `-0` is excluded: it would decode
@@ -278,7 +268,10 @@ mod tests {
         let msg = b"Received block blk_-1608999687919862906 of size 67108864 from /10.250.19.102";
         let (mut tpl, mut vars) = (Vec::new(), Vec::new());
         encode(msg, &mut tpl, &mut vars);
-        assert_eq!(render(&tpl).unwrap(), "Received block <var> of size <int> from /<var>");
+        assert_eq!(
+            render(&tpl).unwrap(),
+            "Received block <var> of size <int> from /<var>"
+        );
         assert_eq!(vars[1], Var::Int(67108864));
         roundtrip(msg);
     }
@@ -286,15 +279,33 @@ mod tests {
     #[test]
     fn number_shapes() {
         for s in [
-            "0", "-0", "007", "-1", "9223372036854775807", "9223372036854775808",
-            "-9223372036854775808", "1.5", "-0.050", "00.10", "1.", ".5", "1.2.3",
-            "1234567890.123456789", "12345678901234567890.1", "-", "0x7fff", "3e10",
+            "0",
+            "-0",
+            "007",
+            "-1",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "1.5",
+            "-0.050",
+            "00.10",
+            "1.",
+            ".5",
+            "1.2.3",
+            "1234567890.123456789",
+            "12345678901234567890.1",
+            "-",
+            "0x7fff",
+            "3e10",
         ] {
             roundtrip(s.as_bytes());
         }
         assert_eq!(classify(b"-0"), Some(Var::Dict(b"-0")));
         assert!(matches!(classify(b"-0.050"), Some(Var::Float(..))));
-        assert_eq!(classify(b"9223372036854775808"), Some(Var::Dict(b"9223372036854775808")));
+        assert_eq!(
+            classify(b"9223372036854775808"),
+            Some(Var::Dict(b"9223372036854775808"))
+        );
     }
 
     #[test]

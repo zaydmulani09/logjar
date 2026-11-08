@@ -116,9 +116,22 @@ type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn run(cli: Cli) -> Res<ExitCode> {
     match cli.cmd {
-        Cmd::Pack { output, append, level, name, inputs } => {
-            let opts = Options { level, ..Options::default() };
-            let mut w = if append { Writer::append(&output, opts)? } else { Writer::create(&output, opts)? };
+        Cmd::Pack {
+            output,
+            append,
+            level,
+            name,
+            inputs,
+        } => {
+            let opts = Options {
+                level,
+                ..Options::default()
+            };
+            let mut w = if append {
+                Writer::append(&output, opts)?
+            } else {
+                Writer::create(&output, opts)?
+            };
             let (mut raw, mut lines) = (0u64, 0u64);
             for input in &inputs {
                 let stats = if input.as_os_str() == "-" {
@@ -159,7 +172,10 @@ fn run(cli: Cli) -> Res<ExitCode> {
             } else {
                 stream
                     .iter()
-                    .map(|n| a.stream_id(n).ok_or_else(|| format!("no stream named {n:?}")))
+                    .map(|n| {
+                        a.stream_id(n)
+                            .ok_or_else(|| format!("no stream named {n:?}"))
+                    })
                     .collect::<Result<_, _>>()?
             };
             let mut out = BufWriter::with_capacity(1 << 16, io::stdout().lock());
@@ -172,10 +188,16 @@ fn run(cli: Cli) -> Res<ExitCode> {
             let a = Archive::open(&archive)?;
             let idx = a.index();
             let mut out = io::stdout().lock();
-            writeln!(out, "{:>12} {:>10} {:>10} {:>7}  stream", "lines", "raw", "stored", "ratio")?;
+            writeln!(
+                out,
+                "{:>12} {:>10} {:>10} {:>7}  stream",
+                "lines", "raw", "stored", "ratio"
+            )?;
             for (i, s) in idx.streams.iter().enumerate() {
                 let segs = idx.segments.iter().filter(|g| g.stream == i as u32);
-                let (lines, raw, stored) = segs.fold((0, 0, 0), |(l, r, c), g| (l + g.lines, r + g.raw_bytes, c + g.len));
+                let (lines, raw, stored) = segs.fold((0, 0, 0), |(l, r, c), g| {
+                    (l + g.lines, r + g.raw_bytes, c + g.len)
+                });
                 writeln!(
                     out,
                     "{lines:>12} {:>10} {:>10} {:>6.1}x  {}",
@@ -264,7 +286,11 @@ fn run(cli: Cli) -> Res<ExitCode> {
                 writeln!(out, "{total}")?;
             }
             out.flush()?;
-            return Ok(if total > 0 { ExitCode::SUCCESS } else { ExitCode::from(1) });
+            return Ok(if total > 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            });
         }
         Cmd::Templates { archive, top } => {
             let a = Archive::open(&archive)?;
@@ -273,7 +299,11 @@ fn run(cli: Cli) -> Res<ExitCode> {
             let mut out = io::stdout().lock();
             writeln!(out, "{} templates over {lines} lines", all.len())?;
             for (t, n) in all.iter().take(top) {
-                writeln!(out, "{n:>10} {:>6.2}%  {t}", 100.0 * *n as f64 / lines.max(1) as f64)?;
+                writeln!(
+                    out,
+                    "{n:>10} {:>6.2}%  {t}",
+                    100.0 * *n as f64 / lines.max(1) as f64
+                )?;
             }
         }
     }
@@ -290,7 +320,9 @@ fn stream_name(p: &Path) -> String {
 /// anything that would write outside the target directory.
 fn safe_relative(name: &str) -> Res<PathBuf> {
     let p = Path::new(name);
-    let ok = !name.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    let ok = !name.is_empty()
+        && p.components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
     if !ok {
         return Err(format!("refusing to unpack stream with unsafe name {name:?}").into());
     }

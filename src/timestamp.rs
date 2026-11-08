@@ -44,7 +44,11 @@ impl Spec {
             0
         };
         let has_year = text.contains("%Y") || text.contains("%y");
-        Spec { text, frac, has_year }
+        Spec {
+            text,
+            frac,
+            has_year,
+        }
     }
 
     /// Native value to nanoseconds since the epoch.
@@ -105,7 +109,15 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let mp = (5 * doy + 2) / 153;
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { yoe + era * 400 + 1 } else { yoe + era * 400 }, m, d)
+    (
+        if m <= 2 {
+            yoe + era * 400 + 1
+        } else {
+            yoe + era * 400
+        },
+        m,
+        d,
+    )
 }
 
 fn digits(input: &[u8], pos: &mut usize, n: usize, space_pad: bool) -> Option<i64> {
@@ -193,7 +205,7 @@ pub fn format(spec: &Spec, value: i64, out: &mut Vec<u8>) -> Result<()> {
         }
         let code = *sp.get(i + 1).ok_or(Error::Corrupt("timestamp spec"))?;
         i += 2;
-        let _ = match code {
+        match code {
             b'Y' if (0..=9999).contains(&y) => write_num(out, y, 4, b'0'),
             b'Y' => return Err(Error::Corrupt("timestamp year out of range")),
             b'y' => write_num(out, y.rem_euclid(100), 2, b'0'),
@@ -285,10 +297,16 @@ mod tests {
             ("2015-10-18 18:01:47,978 INFO", "%Y-%m-%d %H:%M:%S,%3"),
             ("081109 203615 148 INFO dfs.DataNode", "%y%m%d %H%M%S"),
             ("17/06/09 20:10:40 INFO executor", "%y/%m/%d %H:%M:%S"),
-            ("[Sun Dec 04 04:47:44 2005] [notice]", "[%a %b %d %H:%M:%S %Y]"),
+            (
+                "[Sun Dec 04 04:47:44 2005] [notice]",
+                "[%a %b %d %H:%M:%S %Y]",
+            ),
             ("Jun 14 15:16:01 combo sshd", "%b %e %H:%M:%S"),
             ("Jun  9 06:06:20 combo syslogd", "%b %e %H:%M:%S"),
-            ("03-17 16:13:38.811  1702  2395 D Window", "%m-%d %H:%M:%S.%3"),
+            (
+                "03-17 16:13:38.811  1702  2395 D Window",
+                "%m-%d %H:%M:%S.%3",
+            ),
             ("20171223-22:15:29:606|Step_LSC", "%Y%m%d-%H:%M:%S:%3"),
             ("2024-01-15T10:20:30.123456Z GET /", "%Y-%m-%dT%H:%M:%S.%6Z"),
             ("[10.30 16:49:06] chrome.exe", "[%m.%d %H:%M:%S]"),
@@ -319,8 +337,14 @@ mod tests {
         let a = parse_bound("2015-10-18").unwrap();
         let b = parse_bound("2015-10-18T00:00:00Z").unwrap();
         assert_eq!(a, b);
-        assert_eq!(parse_bound("2015-10-18 18:01").unwrap() - a, (18 * 3600 + 60) * 1_000_000_000);
-        assert_eq!(parse_bound("1445191307").unwrap(), 1_445_191_307_000_000_000);
+        assert_eq!(
+            parse_bound("2015-10-18 18:01").unwrap() - a,
+            (18 * 3600 + 60) * 1_000_000_000
+        );
+        assert_eq!(
+            parse_bound("1445191307").unwrap(),
+            1_445_191_307_000_000_000
+        );
         assert!(parse_bound("yesterday").is_none());
     }
 }

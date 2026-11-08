@@ -6,7 +6,9 @@ use std::sync::Mutex;
 /// Worker count used when the caller doesn't say: all cores, capped at 8
 /// because each in-flight segment holds tens of MiB.
 pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get()).min(8)
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8)
 }
 
 /// Runs `f` over `items` on up to `threads` threads and returns the results
@@ -29,7 +31,11 @@ pub fn map<I: Sync, T: Send>(items: &[I], threads: usize, f: impl Fn(&I) -> T + 
     });
     slots
         .into_iter()
-        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("every slot filled"))
+        .map(|m| {
+            m.into_inner()
+                .unwrap_or_else(|e| e.into_inner())
+                .expect("every slot filled")
+        })
         .collect()
 }
 
@@ -38,6 +44,9 @@ mod tests {
     #[test]
     fn keeps_order() {
         let v: Vec<u64> = (0..1000).collect();
-        assert_eq!(super::map(&v, 7, |x| x * 2), v.iter().map(|x| x * 2).collect::<Vec<_>>());
+        assert_eq!(
+            super::map(&v, 7, |x| x * 2),
+            v.iter().map(|x| x * 2).collect::<Vec<_>>()
+        );
     }
 }

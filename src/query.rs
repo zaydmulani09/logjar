@@ -60,7 +60,12 @@ impl Query {
         if toks.last() != Some(&Tok::Star) {
             toks.push(Tok::Star);
         }
-        Ok(Query { toks, ignore_case: false, after: None, before: None })
+        Ok(Query {
+            toks,
+            ignore_case: false,
+            after: None,
+            before: None,
+        })
     }
 
     /// ASCII case-insensitive matching.
@@ -83,7 +88,8 @@ impl Query {
 
     /// Parses `--after`/`--before` style text into nanoseconds.
     pub fn parse_time(s: &str) -> Result<i64> {
-        crate::timestamp::parse_bound(s).ok_or_else(|| Error::Query(format!("unrecognized time {s:?}")))
+        crate::timestamp::parse_bound(s)
+            .ok_or_else(|| Error::Query(format!("unrecognized time {s:?}")))
     }
 
     pub(crate) fn has_time_filter(&self) -> bool {
@@ -150,8 +156,7 @@ impl Query {
 type Set = u128;
 
 /// The glob as a bit-parallel NFA, specialised for one segment.
-pub(crate) struct Nfa<'q> {
-    q: &'q Query,
+pub(crate) struct Nfa {
     star: Set,
     accept: Set,
     /// Positions that consume byte `b` and advance (literal `b` or `?`).
@@ -163,10 +168,10 @@ pub(crate) struct Nfa<'q> {
     ts_class: Set,
 }
 
-impl<'q> Nfa<'q> {
+impl Nfa {
     /// `None` if the pattern is too long for the bitset; callers then skip
     /// pruning and just verify every line.
-    pub fn new(q: &'q Query, specs: &[Spec]) -> Option<Nfa<'q>> {
+    pub fn new(q: &Query, specs: &[Spec]) -> Option<Nfa> {
         let m = q.toks.len();
         if m >= Set::BITS as usize {
             return None;
@@ -186,13 +191,25 @@ impl<'q> Nfa<'q> {
                 }
             }
         }
-        let class = |pred: &dyn Fn(u8) -> bool| (0..=255u8).filter(|&b| pred(b)).fold(0, |s, b| s | lit[b as usize]);
+        let class = |pred: &dyn Fn(u8) -> bool| {
+            (0..=255u8)
+                .filter(|&b| pred(b))
+                .fold(0, |s, b| s | lit[b as usize])
+        };
         let int_class = class(&|b| b.is_ascii_digit() || b == b'-');
         let float_class = class(&|b| b.is_ascii_digit() || b == b'-' || b == b'.');
         let dict_class = class(&|b| !message::is_delim(b));
         let ts_alpha = ts_alphabet(specs);
         let ts_class = class(&|b| ts_alpha[b as usize]);
-        Some(Nfa { q, star, accept: 1 << m, lit, int_class, float_class, dict_class, ts_class })
+        Some(Nfa {
+            star,
+            accept: 1 << m,
+            lit,
+            int_class,
+            float_class,
+            dict_class,
+            ts_class,
+        })
     }
 
     fn close(&self, s: Set) -> Set {
@@ -262,10 +279,6 @@ impl<'q> Nfa<'q> {
         }
         false
     }
-
-    pub fn query(&self) -> &Query {
-        self.q
-    }
 }
 
 /// Memoized "states after reading some dictionary value" for one segment.
@@ -276,10 +289,13 @@ pub(crate) struct DictStates<'d> {
 
 impl<'d> DictStates<'d> {
     pub fn new(dict: &'d [Vec<u8>]) -> Self {
-        DictStates { dict, memo: HashMap::new() }
+        DictStates {
+            dict,
+            memo: HashMap::new(),
+        }
     }
 
-    fn after(&mut self, nfa: &Nfa<'_>, s: Set) -> Set {
+    fn after(&mut self, nfa: &Nfa, s: Set) -> Set {
         if let Some(&r) = self.memo.get(&s) {
             return r;
         }
@@ -309,8 +325,12 @@ fn ts_alphabet(specs: &[Spec]) -> [bool; 256] {
                 continue;
             }
             match it.next() {
-                Some(b'b') => b"JanFebMrApyulgSOctNovDec".iter().for_each(|&c| a[c as usize] = true),
-                Some(b'a') => b"SunMoTueWdhFriSat".iter().for_each(|&c| a[c as usize] = true),
+                Some(b'b') => b"JanFebMrApyulgSOctNovDec"
+                    .iter()
+                    .for_each(|&c| a[c as usize] = true),
+                Some(b'a') => b"SunMoTueWdhFriSat"
+                    .iter()
+                    .for_each(|&c| a[c as usize] = true),
                 Some(b'e') => {
                     a[b' ' as usize] = true;
                     (b'0'..=b'9').for_each(|c| a[c as usize] = true);
@@ -353,7 +373,9 @@ mod tests {
         let specs = [Spec::new("%Y-%m-%d %H:%M:%S,%3")];
         let check = |pat: &str, msg: &str| {
             let q = Query::new(pat).unwrap();
-            Nfa::new(&q, &specs).unwrap().template_may_match(&tpl(msg), None)
+            Nfa::new(&q, &specs)
+                .unwrap()
+                .template_may_match(&tpl(msg), None)
         };
         // Static text decides.
         assert!(check("Exception", "java.lang.NullPointerException at foo"));
@@ -364,7 +386,10 @@ mod tests {
         // Values can only come from slots of a compatible type.
         assert!(check("size 671", "Received block blk_1 of size 67108864"));
         assert!(!check("size abc", "Received block blk_1 of size 67108864"));
-        assert!(check("blk_-16*size", "Received block blk_1 of size 67108864"));
+        assert!(check(
+            "blk_-16*size",
+            "Received block blk_1 of size 67108864"
+        ));
         // Queries touching the timestamp still match via the ts alphabet.
         assert!(check("2015-10-18 18:01", "INFO main started"));
         assert!(!check("2015-10-18 ERROR", "INFO main started"));
@@ -386,7 +411,9 @@ mod tests {
     /// Pruning must never reject a template that a real line matches.
     #[test]
     fn pruning_is_sound_on_random_lines() {
-        let words = ["ERROR", "blk_", "-", "12", "0.5", "a1b", " ", ":", "/", "x", "=", "007", ".", "Z"];
+        let words = [
+            "ERROR", "blk_", "-", "12", "0.5", "a1b", " ", ":", "/", "x", "=", "007", ".", "Z",
+        ];
         let mut s = 0x2545f4914f6cdd1du64;
         let mut rnd = |n: usize| {
             s ^= s << 13;
@@ -428,7 +455,10 @@ mod tests {
                 .collect();
             let nfa = Nfa::new(&q, &specs).unwrap();
             let pieces = message::pieces(&t).unwrap();
-            assert!(nfa.template_may_match(&pieces, None), "coarse: {pat:?} in {line:?}");
+            assert!(
+                nfa.template_may_match(&pieces, None),
+                "coarse: {pat:?} in {line:?}"
+            );
             assert!(
                 nfa.template_may_match(&pieces, Some(&mut DictStates::new(&dict))),
                 "dict: {pat:?} in {line:?}"

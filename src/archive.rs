@@ -85,7 +85,8 @@ impl Index {
         let n = c.usize()?;
         let mut streams = Vec::with_capacity(n.min(4096));
         for _ in 0..n {
-            let name = String::from_utf8(c.bytes()?.to_vec()).map_err(|_| Error::Corrupt("stream name"))?;
+            let name = String::from_utf8(c.bytes()?.to_vec())
+                .map_err(|_| Error::Corrupt("stream name"))?;
             let unterminated = c.take(1)?[0] == 1;
             streams.push(StreamInfo { name, unterminated });
         }
@@ -102,7 +103,14 @@ impl Index {
                 0 => None,
                 _ => Some((c.i64()?, c.i64()?)),
             };
-            segments.push(SegmentInfo { offset, len, stream, lines, raw_bytes, time_range });
+            segments.push(SegmentInfo {
+                offset,
+                len,
+                stream,
+                lines,
+                raw_bytes,
+                time_range,
+            });
         }
         if !c.is_empty() {
             return Err(Error::Corrupt("trailing footer bytes"));
@@ -117,7 +125,8 @@ fn read_index(file: &mut File) -> Result<(Index, u64)> {
     let size = file.seek(SeekFrom::End(0))?;
     let mut header = [0u8; 8];
     file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut header).map_err(|_| Error::Corrupt("not a logjar archive"))?;
+    file.read_exact(&mut header)
+        .map_err(|_| Error::Corrupt("not a logjar archive"))?;
     if &header != HEADER {
         return Err(Error::Corrupt("not a logjar archive"));
     }
@@ -163,7 +172,11 @@ fn try_trailer(file: &mut File, end: u64) -> Result<Option<(Index, u64)>> {
         return Ok(None);
     }
     let index = Index::decode(&footer)?;
-    if index.segments.iter().any(|s| s.offset.saturating_add(s.len) > off) {
+    if index
+        .segments
+        .iter()
+        .any(|s| s.offset.saturating_add(s.len) > off)
+    {
         return Ok(None);
     }
     Ok(Some((index, end)))
@@ -184,7 +197,12 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { level: 9, segment_bytes: 32 << 20, segment_lines: 1 << 20, threads: par::default_threads() }
+        Options {
+            level: 9,
+            segment_bytes: 32 << 20,
+            segment_lines: 1 << 20,
+            threads: par::default_threads(),
+        }
     }
 }
 
@@ -211,7 +229,12 @@ impl Writer {
     pub fn create(path: impl AsRef<Path>, opts: Options) -> Result<Writer> {
         let mut file = File::create(path)?;
         file.write_all(HEADER)?;
-        Ok(Writer { file, pos: HEADER.len() as u64, index: Index::default(), opts })
+        Ok(Writer {
+            file,
+            pos: HEADER.len() as u64,
+            index: Index::default(),
+            opts,
+        })
     }
 
     /// Opens an existing archive for appending. A torn tail from an earlier
@@ -221,7 +244,12 @@ impl Writer {
         let (index, end) = read_index(&mut file)?;
         file.set_len(end)?;
         file.seek(SeekFrom::Start(end))?;
-        Ok(Writer { file, pos: end, index, opts })
+        Ok(Writer {
+            file,
+            pos: end,
+            index,
+            opts,
+        })
     }
 
     pub fn index(&self) -> &Index {
@@ -239,7 +267,10 @@ impl Writer {
             }
             Some(i) => i,
             None => {
-                self.index.streams.push(StreamInfo { name: name.to_string(), unterminated: false });
+                self.index.streams.push(StreamInfo {
+                    name: name.to_string(),
+                    unterminated: false,
+                });
                 self.index.streams.len() - 1
             }
         } as u32;
@@ -278,7 +309,11 @@ impl Writer {
         }
         if self.index.streams[id as usize].unterminated {
             stats.raw_bytes -= 1;
-            let last = self.index.segments.last_mut().expect("unterminated implies a line");
+            let last = self
+                .index
+                .segments
+                .last_mut()
+                .expect("unterminated implies a line");
             last.raw_bytes -= 1;
         }
         Ok(stats)
@@ -346,7 +381,11 @@ impl Archive {
     pub fn open(path: impl AsRef<Path>) -> Result<Archive> {
         let mut file = File::open(path)?;
         let (index, size) = read_index(&mut file)?;
-        Ok(Archive { file: Mutex::new(file), index, size })
+        Ok(Archive {
+            file: Mutex::new(file),
+            index,
+            size,
+        })
     }
 
     pub fn index(&self) -> &Index {
@@ -359,12 +398,17 @@ impl Archive {
     }
 
     pub fn stream_id(&self, name: &str) -> Option<u32> {
-        self.index.streams.iter().position(|s| s.name == name).map(|i| i as u32)
+        self.index
+            .streams
+            .iter()
+            .position(|s| s.name == name)
+            .map(|i| i as u32)
     }
 
     pub(crate) fn read_segment(&self, i: usize) -> Result<Segment> {
         let info = &self.index.segments[i];
-        let mut buf = vec![0u8; usize::try_from(info.len).map_err(|_| Error::Corrupt("segment len"))?];
+        let mut buf =
+            vec![0u8; usize::try_from(info.len).map_err(|_| Error::Corrupt("segment len"))?];
         {
             let mut f = self.file.lock().unwrap_or_else(|e| e.into_inner());
             f.seek(SeekFrom::Start(info.offset))?;
@@ -375,7 +419,11 @@ impl Archive {
 
     /// Writes the exact original bytes of one stream.
     pub fn write_stream(&self, stream: u32, out: &mut impl Write) -> Result<()> {
-        let info = self.index.streams.get(stream as usize).ok_or_else(|| Error::Invalid("no such stream".into()))?;
+        let info = self
+            .index
+            .streams
+            .get(stream as usize)
+            .ok_or_else(|| Error::Invalid("no such stream".into()))?;
         let segs: Vec<usize> = (0..self.index.segments.len())
             .filter(|&i| self.index.segments[i].stream == stream)
             .collect();
@@ -409,16 +457,21 @@ mod tests {
 
     fn unpack(a: &Archive, name: &str) -> Vec<u8> {
         let mut out = Vec::new();
-        a.write_stream(a.stream_id(name).unwrap(), &mut out).unwrap();
+        a.write_stream(a.stream_id(name).unwrap(), &mut out)
+            .unwrap();
         out
     }
 
     #[test]
     fn create_append_read() {
         let p = tmp("basic.ljar");
-        let small = Options { segment_lines: 2, ..Options::default() };
+        let small = Options {
+            segment_lines: 2,
+            ..Options::default()
+        };
         let mut w = Writer::create(&p, small.clone()).unwrap();
-        w.add_stream("a.log", &b"one 1\ntwo 2\nthree 3\n"[..]).unwrap();
+        w.add_stream("a.log", &b"one 1\ntwo 2\nthree 3\n"[..])
+            .unwrap();
         w.add_stream("b.log", &b"no newline at end 42"[..]).unwrap();
         w.finish().unwrap();
 
@@ -442,7 +495,8 @@ mod tests {
         let good = std::fs::metadata(&p).unwrap().len();
         // Simulate a crash halfway through an append: garbage after the footer.
         let mut f = OpenOptions::new().append(true).open(&p).unwrap();
-        f.write_all(b"\x28\xb5\x2f\xfd half a segment LJF1 junk").unwrap();
+        f.write_all(b"\x28\xb5\x2f\xfd half a segment LJF1 junk")
+            .unwrap();
         drop(f);
 
         let a = Archive::open(&p).unwrap();

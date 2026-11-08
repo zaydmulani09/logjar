@@ -38,7 +38,6 @@ const MAX_BLOCK: usize = 1 << 31;
 #[derive(Default)]
 struct TemplateCols {
     bytes: Vec<u8>,
-    slots: Vec<Kind>,
     rows: u64,
     /// One column per slot. Floats take two entries per row.
     cols: Vec<Vec<u64>>,
@@ -82,14 +81,6 @@ impl Builder {
         }
     }
 
-    pub fn lines(&self) -> usize {
-        self.events.len()
-    }
-
-    pub fn raw_bytes(&self) -> usize {
-        self.raw_bytes
-    }
-
     /// Adds one line, without its trailing `\n`.
     pub fn push(&mut self, line: &[u8]) {
         self.raw_bytes += line.len() + 1;
@@ -127,7 +118,6 @@ impl Builder {
                 self.templates.push(TemplateCols {
                     bytes: self.tpl_buf.clone(),
                     cols: vec![Vec::new(); slots.len()],
-                    slots,
                     rows: 0,
                 });
                 self.tpl_ids.insert(self.tpl_buf.clone(), t);
@@ -269,7 +259,9 @@ impl Segment {
                 return Err(Error::Corrupt("block too large"));
             }
             *b = (start, len, raw);
-            start = start.checked_add(len).ok_or(Error::Corrupt("block offset"))?;
+            start = start
+                .checked_add(len)
+                .ok_or(Error::Corrupt("block offset"))?;
         }
         if start > bytes.len() {
             return Err(Error::Corrupt("segment truncated"));
@@ -301,7 +293,12 @@ impl Segment {
         for _ in 0..n {
             let bytes = c.bytes()?.to_vec();
             let slots = message::slots(&bytes)?;
-            templates.push(Template { bytes, slots, rows: c.u64()?, var_offset: c.usize()? });
+            templates.push(Template {
+                bytes,
+                slots,
+                rows: c.u64()?,
+                var_offset: c.usize()?,
+            });
         }
         Ok(Meta { specs, templates })
     }
@@ -333,7 +330,10 @@ impl Segment {
         let mut c = Cursor::new(&raw);
         let mut out = Vec::with_capacity(lines);
         for _ in 0..lines {
-            out.push((u32::try_from(c.u64()?).map_err(|_| Error::Corrupt("spec id"))?, 0));
+            out.push((
+                u32::try_from(c.u64()?).map_err(|_| Error::Corrupt("spec id"))?,
+                0,
+            ));
         }
         let mut prev = 0i64;
         for t in &mut out {
@@ -353,7 +353,10 @@ impl Segment {
 /// Reads one template's variables out of the `vars` block: one column per
 /// slot, floats as (value, meta) pairs.
 pub fn template_columns(vars: &[u8], t: &Template) -> Result<Vec<Vec<u64>>> {
-    let mut c = Cursor::new(vars.get(t.var_offset..).ok_or(Error::Corrupt("var offset"))?);
+    let mut c = Cursor::new(
+        vars.get(t.var_offset..)
+            .ok_or(Error::Corrupt("var offset"))?,
+    );
     let rows = usize::try_from(t.rows).map_err(|_| Error::Corrupt("rows"))?;
     t.slots
         .iter()
@@ -389,7 +392,8 @@ pub fn write_line(
                     Kind::Int => Var::Int(varint::unzigzag(get(row)?)),
                     Kind::Float => Var::Float(get(row * 2)?, get(row * 2 + 1)?),
                     Kind::Dict => Var::Dict(
-                        dict.get(get(row)? as usize).ok_or(Error::Corrupt("dict id"))?,
+                        dict.get(get(row)? as usize)
+                            .ok_or(Error::Corrupt("dict id"))?,
                     ),
                 };
                 message::write_var(&var, out)?;
@@ -403,7 +407,11 @@ pub fn write_line(
 }
 
 /// Fully decodes a segment, calling `f` with each line (no newline).
-pub fn decode_all(seg: &Segment, lines: usize, mut f: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
+pub fn decode_all(
+    seg: &Segment,
+    lines: usize,
+    mut f: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
     let meta = seg.meta()?;
     let dict = seg.dict()?;
     let events = seg.events()?;
@@ -420,7 +428,10 @@ pub fn decode_all(seg: &Segment, lines: usize, mut f: impl FnMut(&[u8]) -> Resul
         let tpl = meta.templates.get(t).ok_or(Error::Corrupt("template id"))?;
         line.clear();
         if spec != 0 {
-            let s = meta.specs.get(spec as usize - 1).ok_or(Error::Corrupt("spec id"))?;
+            let s = meta
+                .specs
+                .get(spec as usize - 1)
+                .ok_or(Error::Corrupt("spec id"))?;
             timestamp::format(s, value, &mut line)?;
         }
         if cols[t].is_none() {
