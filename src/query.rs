@@ -97,12 +97,12 @@ impl Query {
     }
 
     pub(crate) fn time_ok(&self, ns: i64) -> bool {
-        self.after.map_or(true, |a| ns >= a) && self.before.map_or(true, |b| ns < b)
+        self.after.is_none_or(|a| ns >= a) && self.before.is_none_or(|b| ns < b)
     }
 
     /// Whether the window overlaps `[lo, hi]`.
     pub(crate) fn range_ok(&self, lo: i64, hi: i64) -> bool {
-        self.after.map_or(true, |a| hi >= a) && self.before.map_or(true, |b| lo < b)
+        self.after.is_none_or(|a| hi >= a) && self.before.is_none_or(|b| lo < b)
     }
 
     /// True if the pattern is just `*`: every line matches, pruning is moot.

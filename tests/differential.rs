@@ -4,6 +4,9 @@
 
 use logjar::{Archive, Options, Query, Writer};
 
+/// A generated line and its true timestamp.
+type Line = (String, Option<i64>);
+
 struct Rng(u64);
 
 impl Rng {
@@ -109,7 +112,7 @@ fn naive(lines: &[(String, Option<i64>)], q: &Query, window: Option<(i64, i64)>)
         .enumerate()
         .filter(|(_, (l, ns))| {
             q.is_match(l.as_bytes())
-                && window.map_or(true, |(lo, hi)| ns.is_some_and(|n| n >= lo && n < hi))
+                && window.is_none_or(|(lo, hi)| ns.is_some_and(|n| n >= lo && n < hi))
         })
         .map(|(i, _)| i as u64 + 1)
         .collect()
@@ -153,7 +156,7 @@ fn search_equals_naive_scan() {
             level: 1 + r.below(5) as i32,
             ..Options::default()
         };
-        let mut streams: Vec<(String, String, Vec<(String, Option<i64>)>)> = Vec::new();
+        let mut streams: Vec<(String, String, Vec<Line>)> = Vec::new();
         let mut t = 1_615_500_000_000i64;
         for s in 0..3 {
             let n = 300 + r.below(1500);

@@ -358,7 +358,7 @@ fn run(cli: Cli) -> Res<ExitCode> {
                             return false;
                         }
                     }
-                    max_count.map_or(true, |mx| total < mx)
+                    max_count.is_none_or(|mx| total < mx)
                 })?;
                 if let Some(e) = io_err.take() {
                     return Err(e.into());

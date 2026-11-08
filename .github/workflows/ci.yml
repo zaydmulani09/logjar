@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+      - name: library builds without the CLI
+        run: cargo build --lib --no-default-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets
+
+  loghub:
+    # Round-trips and searches two real LogHub datasets end to end.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/fetch-loghub.sh Zookeeper Linux
+      - run: cargo build --release
+      - name: round trip
+        run: |
+          for f in data/Zookeeper/Zookeeper.log data/Linux/Linux.log; do
+            target/release/logjar pack -o /tmp/a.ljar "$f"
+            target/release/logjar cat /tmp/a.ljar | cmp - "$f"
+          done
+      - name: grep agrees with grep
+        run: |
+          target/release/logjar pack -q -o /tmp/z.ljar data/Zookeeper/Zookeeper.log
+          for q in "WARN" "Connection broken for id" "0x14ede63a5a70000"; do
+            want=$(grep -cF "$q" data/Zookeeper/Zookeeper.log || true)
+            got=$(target/release/logjar grep -c "$q" /tmp/z.ljar || true)
+            echo "$q: grep=$want logjar=$got"
+            test "$want" = "$got"
+          done

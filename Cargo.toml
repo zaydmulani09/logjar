@@ -2,7 +2,7 @@
 name = "logjar"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Searchable compressed log archives: template/variable encoding with grep that skips what it can't match"
 license = "MIT"
 repository = "https://github.com/zaydmulani09/logjar"
@@ -11,9 +11,18 @@ keywords = ["logs", "compression", "search", "grep", "archive"]
 categories = ["compression", "command-line-utilities", "database-implementations"]
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 crc32fast = "1.4"
 zstd = { version = "0.13", default-features = false }
+
+[features]
+default = ["cli"]
+# The command-line tool. Library users can opt out with default-features = false.
+cli = ["dep:clap"]
+
+[[bin]]
+name = "logjar"
+required-features = ["cli"]
 
 [profile.release]
 lto = "thin"
