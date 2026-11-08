@@ -9,6 +9,7 @@ repository = "https://github.com/zaydmulani09/logjar"
 readme = "README.md"
 keywords = ["logs", "compression", "search", "grep", "archive"]
 categories = ["compression", "command-line-utilities", "database-implementations"]
+exclude = ["/data", "/scripts", "/.github"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"], optional = true }
