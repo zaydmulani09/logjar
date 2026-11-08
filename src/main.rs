@@ -26,6 +26,13 @@ enum Cmd {
         /// zstd level (1-22)
         #[arg(short, long, default_value_t = Options::default().level)]
         level: i32,
+        /// Target uncompressed size of each segment, in MiB. Bigger segments
+        /// compress better; smaller ones let search skip more precisely.
+        #[arg(long, default_value_t = Options::default().segment_bytes >> 20)]
+        segment_mb: usize,
+        /// Encoder threads
+        #[arg(short = 'j', long, default_value_t = Options::default().threads)]
+        threads: usize,
         /// Stream name to use for stdin
         #[arg(long, default_value = "stdin")]
         name: String,
@@ -122,11 +129,15 @@ fn run(cli: Cli) -> Res<ExitCode> {
             output,
             append,
             level,
+            segment_mb,
+            threads,
             name,
             inputs,
         } => {
             let opts = Options {
                 level,
+                segment_bytes: segment_mb.max(1) << 20,
+                threads,
                 ..Options::default()
             };
             let mut w = if append {
@@ -307,8 +318,16 @@ fn run(cli: Cli) -> Res<ExitCode> {
                 human(a.size()),
                 st.raw_bytes as f64 / a.size().max(1) as f64
             )?;
-            writeln!(out, "{} template entries, {} dictionary entries", st.templates, st.dict_entries)?;
-            writeln!(out, "{:<8} {:>12} {:>12} {:>7} {:>7}", "block", "raw", "stored", "ratio", "share")?;
+            writeln!(
+                out,
+                "{} template entries, {} dictionary entries",
+                st.templates, st.dict_entries
+            )?;
+            writeln!(
+                out,
+                "{:<8} {:>12} {:>12} {:>7} {:>7}",
+                "block", "raw", "stored", "ratio", "share"
+            )?;
             for (name, raw, comp) in st.blocks {
                 writeln!(
                     out,
