@@ -20,7 +20,7 @@ use std::sync::Mutex;
 
 use crate::segment::{self, Builder, Segment};
 use crate::varint::{self, Cursor};
-use crate::{Error, Result};
+use crate::{par, Error, Result};
 
 const HEADER: &[u8; 8] = b"LOGJAR\0\x01";
 const TRAILER_MAGIC: &[u8; 4] = b"LJF1";
@@ -178,11 +178,13 @@ pub struct Options {
     pub segment_bytes: usize,
     /// Close a segment after this many lines.
     pub segment_lines: usize,
+    /// Segments encoded in parallel.
+    pub threads: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { level: 9, segment_bytes: 32 << 20, segment_lines: 1 << 20 }
+        Options { level: 9, segment_bytes: 32 << 20, segment_lines: 1 << 20, threads: par::default_threads() }
     }
 }
 
@@ -243,26 +245,36 @@ impl Writer {
         } as u32;
 
         let mut stats = StreamStats::default();
-        let mut builder = Builder::new(id);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            if input.read_until(b'\n', &mut line)? == 0 {
-                break;
+        let threads = self.opts.threads.max(1);
+        let mut eof = false;
+        // Read up to `threads` segment-sized chunks, encode them in
+        // parallel, write them in order, repeat. Memory stays bounded at
+        // roughly `threads` segments in flight.
+        while !eof {
+            let mut chunks = Vec::with_capacity(threads);
+            while chunks.len() < threads {
+                let (chunk, more) = read_chunk(&mut input, &self.opts)?;
+                if !chunk.is_empty() {
+                    chunks.push(chunk);
+                }
+                if !more {
+                    eof = true;
+                    break;
+                }
             }
-            if line.last() == Some(&b'\n') {
-                line.pop();
-            } else {
+            let level = self.opts.level;
+            let encoded = par::map(&chunks, threads, |chunk| {
+                let mut b = Builder::new(id);
+                let body = chunk.strip_suffix(b"\n").unwrap_or(chunk);
+                body.split(|&c| c == b'\n').for_each(|line| b.push(line));
+                b.finish(level)
+            });
+            if chunks.last().is_some_and(|c| c.last() != Some(&b'\n')) {
                 self.index.streams[id as usize].unterminated = true;
             }
-            builder.push(&line);
-            if builder.raw_bytes() >= self.opts.segment_bytes || builder.lines() >= self.opts.segment_lines {
-                let full = std::mem::replace(&mut builder, Builder::new(id));
-                self.write_segment(full, &mut stats)?;
+            for enc in encoded {
+                self.write_segment(enc?, &mut stats)?;
             }
-        }
-        if builder.lines() > 0 {
-            self.write_segment(builder, &mut stats)?;
         }
         if self.index.streams[id as usize].unterminated {
             stats.raw_bytes -= 1;
@@ -272,8 +284,7 @@ impl Writer {
         Ok(stats)
     }
 
-    fn write_segment(&mut self, b: Builder, stats: &mut StreamStats) -> Result<()> {
-        let enc = b.finish(self.opts.level)?;
+    fn write_segment(&mut self, enc: segment::Encoded, stats: &mut StreamStats) -> Result<()> {
         self.file.write_all(&enc.bytes)?;
         let len = enc.bytes.len() as u64;
         self.index.segments.push(segment_info(&enc, self.pos));
@@ -297,6 +308,20 @@ impl Writer {
         self.file.sync_all()?;
         Ok(self.index)
     }
+}
+
+/// Reads whole lines (newlines kept) until the chunk reaches the segment
+/// limits. Returns the chunk and whether more input may follow.
+fn read_chunk(input: &mut impl BufRead, opts: &Options) -> Result<(Vec<u8>, bool)> {
+    let mut chunk = Vec::new();
+    let mut lines = 0;
+    while chunk.len() < opts.segment_bytes && lines < opts.segment_lines {
+        if input.read_until(b'\n', &mut chunk)? == 0 || chunk.last() != Some(&b'\n') {
+            return Ok((chunk, false));
+        }
+        lines += 1;
+    }
+    Ok((chunk, true))
 }
 
 fn segment_info(enc: &segment::Encoded, offset: u64) -> SegmentInfo {
