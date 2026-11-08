@@ -292,6 +292,8 @@ fn grep_regex() {
     assert_eq!(count(&["-E", r"\d ms$"]), "1\n");
     assert_eq!(count(&["-E", r"^\tat "]), "1\n");
     assert_eq!(count(&["-E", r"rhost=(\d+\.){3}\d+"]), "1\n");
+    // auth.log has CRLF endings; `$` matches before the CR.
+    assert_eq!(count(&["-E", "(unknown|[0-9])$"]), "4\n");
     assert_eq!(count(&["-E", "-e", "Slow", "-e", r"pass;"]), "2\n");
     // Without -E the same text is a glob: parentheses are literal.
     assert_eq!(count(&["(WARN|ERROR) "]), "0\n");

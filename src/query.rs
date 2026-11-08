@@ -292,8 +292,16 @@ impl<'q> Pruner<'q> {
         if p.accepts_mid(s) {
             return true;
         }
-        for piece in pieces {
+        for (i, piece) in pieces.iter().enumerate() {
             s = match piece {
+                // Mirror is_match: an end anchor ignores the line's final CR,
+                // which (being a delimiter) is always template text.
+                Piece::Text(t) if p.end_anchor && i + 1 == pieces.len() => {
+                    match run_hit(p, s, at_start, t.strip_suffix(b"\r").unwrap_or(t)) {
+                        Some(s) => s,
+                        None => return true,
+                    }
+                }
                 Piece::Text(t) => match run_hit(p, s, at_start, t) {
                     Some(s) => s,
                     None => return true,
@@ -478,6 +486,8 @@ mod tests {
         assert!(r(r"ms$", "GC pause 4.5 ms"));
         assert!(!r(r"ms$", "GC pause 4.5 ms total"));
         assert!(r(r"\d$", "retries 3"));
+        assert!(r(r"\d$", "retries 3\r"));
+        assert!(!r(r"\d$", "retries 3 \r"));
         // Start anchor: only reachable through the (optional) timestamp.
         assert!(r("^2015-10", "INFO started"));
         assert!(!r("^INFO x", "WARN INFO x"));

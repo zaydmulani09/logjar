@@ -159,6 +159,12 @@ impl Prog {
     }
 
     pub fn is_match(&self, line: &[u8]) -> bool {
+        // `$` matches before a CRLF line ending's CR, as in grep on Windows
+        // and `rg --crlf`: archives keep the CR, but it is not content.
+        let line = match self.end_anchor {
+            true => line.strip_suffix(b"\r").unwrap_or(line),
+            false => line,
+        };
         if self.nullable && (!self.end_anchor || !self.start_anchor || line.is_empty()) {
             return true;
         }
@@ -528,7 +534,10 @@ mod tests {
         assert!(m("[]x]", "]"));
         assert!(m("[a-]", "-"));
         assert!(Prog::regex("err", true).unwrap().is_match(b"ERROR"));
-        // Case-insensitive negation folds first: [^a] excludes A as well.
+        assert!(m(r"\d$", "retries 3\r"));
+        assert!(m("^$", "\r"));
+        assert!(!m(r"\d\r", "retries 3")); // only `$` treats CR as an ending
+                                           // Case-insensitive negation folds first: [^a] excludes A as well.
         let neg = Prog::regex("^[^a1]$", true).unwrap();
         assert!(!neg.is_match(b"A") && !neg.is_match(b"a") && neg.is_match(b"b"));
     }
