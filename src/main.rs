@@ -256,7 +256,12 @@ fn run(cli: Cli) -> Res<ExitCode> {
                 if !stream.is_empty() && ids.is_empty() {
                     continue;
                 }
-                let prefix = with_stream || archives.len() > 1 || a.index().streams.len() > 1;
+                let searched = if ids.is_empty() {
+                    a.index().streams.len()
+                } else {
+                    ids.len()
+                };
+                let prefix = with_stream || archives.len() > 1 || searched > 1;
                 let names = &a.index().streams;
                 let started = std::time::Instant::now();
                 let st = a.search(&q, &ids, |m| {
