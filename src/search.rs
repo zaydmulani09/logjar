@@ -158,37 +158,40 @@ impl Archive {
         let meta = seg.meta()?;
         st.templates = meta.templates.len() as u64;
         let mut dict: Option<Vec<Vec<u8>>> = None;
-        let candidates: Vec<bool> =
-            match Nfa::new(q, &meta.specs).filter(|_| !q.matches_everything()) {
-                None => vec![true; meta.templates.len()],
-                Some(nfa) => {
-                    let mut out = Vec::with_capacity(meta.templates.len());
-                    let mut coarse = Vec::new();
-                    for t in &meta.templates {
-                        let pieces = message::pieces(&t.bytes)?;
-                        let ok = nfa.template_may_match(&pieces, None);
-                        out.push(ok);
-                        coarse.push(pieces);
-                    }
-                    // Refine survivors that have dictionary slots against the
-                    // segment's real dictionary values.
-                    let needs_dict = meta
-                        .templates
-                        .iter()
-                        .zip(&out)
-                        .any(|(t, &ok)| ok && t.slots.contains(&Kind::Dict));
-                    if needs_dict {
-                        let d = dict.insert(seg.dict()?);
-                        let mut states = DictStates::new(d);
-                        for (j, t) in meta.templates.iter().enumerate() {
-                            if out[j] && t.slots.contains(&Kind::Dict) {
-                                out[j] = nfa.template_may_match(&coarse[j], Some(&mut states));
-                            }
+        let candidates: Vec<bool> = match Nfa::all(q, &meta.specs) {
+            None => vec![true; meta.templates.len()],
+            Some(nfas) => {
+                let mut out = Vec::with_capacity(meta.templates.len());
+                let mut coarse = Vec::new();
+                for t in &meta.templates {
+                    let pieces = message::pieces(&t.bytes)?;
+                    let ok = nfas.iter().any(|n| n.template_may_match(&pieces, None));
+                    out.push(ok);
+                    coarse.push(pieces);
+                }
+                // Refine survivors that have dictionary slots against the
+                // segment's real dictionary values.
+                let needs_dict = meta
+                    .templates
+                    .iter()
+                    .zip(&out)
+                    .any(|(t, &ok)| ok && t.slots.contains(&Kind::Dict));
+                if needs_dict {
+                    let d = dict.insert(seg.dict()?);
+                    let mut states: Vec<DictStates> =
+                        nfas.iter().map(|_| DictStates::new(d)).collect();
+                    for (j, t) in meta.templates.iter().enumerate() {
+                        if out[j] && t.slots.contains(&Kind::Dict) {
+                            out[j] = nfas
+                                .iter()
+                                .zip(&mut states)
+                                .any(|(n, st)| n.template_may_match(&coarse[j], Some(st)));
                         }
                     }
-                    out
                 }
-            };
+                out
+            }
+        };
         st.templates_matched = candidates.iter().filter(|&&c| c).count() as u64;
         if st.templates_matched == 0 {
             st.segments_skipped_templates = 1;
@@ -423,9 +426,26 @@ mod tests {
             "Received*from /10.0.1.1",
             "",
         ];
+        let mut cases: Vec<(String, Query)> = Vec::new();
         for pat in queries {
             for ic in [false, true] {
-                let q = Query::new(pat).unwrap().ignore_case(ic);
+                cases.push((
+                    format!("{pat:?} ic={ic}"),
+                    Query::new(pat).unwrap().ignore_case(ic),
+                ));
+            }
+        }
+        // Alternatives and inversion.
+        let or = |a: &str, b: &str| Query::new(a).unwrap().or(b).unwrap();
+        cases.push(("ERROR|GC".into(), or("ERROR", "GC pause 1?.0")));
+        cases.push(("blk_42 |#4999".into(), or("blk_42 ", "#4999")));
+        cases.push((
+            "!heartbeat".into(),
+            Query::new("heartbeat").unwrap().invert(true),
+        ));
+        cases.push(("!(ERROR|INFO)".into(), or("ERROR", "INFO").invert(true)));
+        for (label, q) in cases {
+            {
                 let mut got = Vec::new();
                 let stats = a
                     .search(&q, &[], |m| {
@@ -439,7 +459,7 @@ mod tests {
                     .filter(|(_, l)| q.is_match(l.as_bytes()))
                     .map(|(n, _)| n as u64 + 1)
                     .collect();
-                assert_eq!(got, want, "query {pat:?} ic={ic}");
+                assert_eq!(got, want, "query {label}");
                 assert_eq!(stats.matches, want.len() as u64);
             }
         }

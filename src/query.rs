@@ -31,46 +31,66 @@ enum Tok {
     Star,
 }
 
-/// A compiled search: glob pattern plus optional time window.
+/// A compiled search: one or more glob patterns (any may match), plus
+/// optional inversion and time window.
 #[derive(Clone, Debug)]
 pub struct Query {
-    toks: Vec<Tok>,
+    pats: Vec<Vec<Tok>>,
     ignore_case: bool,
+    invert: bool,
     pub(crate) after: Option<i64>,
     pub(crate) before: Option<i64>,
+}
+
+fn parse_glob(pattern: &str) -> Vec<Tok> {
+    let mut toks = vec![Tok::Star];
+    let mut it = pattern.bytes();
+    while let Some(b) = it.next() {
+        let t = match b {
+            b'*' => Tok::Star,
+            b'?' => Tok::Any,
+            b'\\' => Tok::Lit(it.next().unwrap_or(b'\\')),
+            b => Tok::Lit(b),
+        };
+        if !(t == Tok::Star && toks.last() == Some(&Tok::Star)) {
+            toks.push(t);
+        }
+    }
+    if toks.last() != Some(&Tok::Star) {
+        toks.push(Tok::Star);
+    }
+    toks
 }
 
 impl Query {
     /// Parses a glob. The pattern matches anywhere in a line, as if wrapped
     /// in `*...*`. An empty pattern matches every line.
     pub fn new(pattern: &str) -> Result<Query> {
-        let mut toks = vec![Tok::Star];
-        let mut it = pattern.bytes();
-        while let Some(b) = it.next() {
-            let t = match b {
-                b'*' => Tok::Star,
-                b'?' => Tok::Any,
-                b'\\' => Tok::Lit(it.next().unwrap_or(b'\\')),
-                b => Tok::Lit(b),
-            };
-            if !(t == Tok::Star && toks.last() == Some(&Tok::Star)) {
-                toks.push(t);
-            }
-        }
-        if toks.last() != Some(&Tok::Star) {
-            toks.push(Tok::Star);
-        }
         Ok(Query {
-            toks,
+            pats: vec![parse_glob(pattern)],
             ignore_case: false,
+            invert: false,
             after: None,
             before: None,
         })
     }
 
+    /// Adds an alternative: lines matching any pattern match the query.
+    pub fn or(mut self, pattern: &str) -> Result<Query> {
+        self.pats.push(parse_glob(pattern));
+        Ok(self)
+    }
+
     /// ASCII case-insensitive matching.
     pub fn ignore_case(mut self, yes: bool) -> Query {
         self.ignore_case = yes;
+        self
+    }
+
+    /// Select lines that match none of the patterns (the time window still
+    /// applies as a filter). Inverted queries cannot prune templates.
+    pub fn invert(mut self, yes: bool) -> Query {
+        self.invert = yes;
         self
     }
 
@@ -105,9 +125,9 @@ impl Query {
         self.after.is_none_or(|a| hi >= a) && self.before.is_none_or(|b| lo < b)
     }
 
-    /// True if the pattern is just `*`: every line matches, pruning is moot.
+    /// True if some pattern is just `*`: every line matches, pruning is moot.
     pub(crate) fn matches_everything(&self) -> bool {
-        self.toks == [Tok::Star]
+        !self.invert && self.pats.iter().any(|p| p == &[Tok::Star])
     }
 
     fn eq(&self, p: u8, b: u8) -> bool {
@@ -118,9 +138,12 @@ impl Query {
         }
     }
 
-    /// Exact check on a decoded line.
+    /// Exact check on a decoded line (ignores the time window).
     pub fn is_match(&self, line: &[u8]) -> bool {
-        let p = &self.toks;
+        self.pats.iter().any(|p| self.glob(p, line)) != self.invert
+    }
+
+    fn glob(&self, p: &[Tok], line: &[u8]) -> bool {
         let (mut pi, mut si) = (0, 0);
         let mut star: Option<(usize, usize)> = None;
         while si < line.len() {
@@ -169,16 +192,24 @@ pub(crate) struct Nfa {
 }
 
 impl Nfa {
-    /// `None` if the pattern is too long for the bitset; callers then skip
-    /// pruning and just verify every line.
-    pub fn new(q: &Query, specs: &[Spec]) -> Option<Nfa> {
-        let m = q.toks.len();
+    /// One automaton per pattern, or `None` when pruning can't help: the
+    /// query is inverted, matches everything, or has a pattern too long for
+    /// the bitset. Callers then just verify every line.
+    pub fn all(q: &Query, specs: &[Spec]) -> Option<Vec<Nfa>> {
+        if q.invert || q.matches_everything() {
+            return None;
+        }
+        q.pats.iter().map(|p| Nfa::new(q, p, specs)).collect()
+    }
+
+    fn new(q: &Query, toks: &[Tok], specs: &[Spec]) -> Option<Nfa> {
+        let m = toks.len();
         if m >= Set::BITS as usize {
             return None;
         }
         let mut lit = Box::new([0 as Set; 256]);
         let mut star = 0;
-        for (j, t) in q.toks.iter().enumerate() {
+        for (j, t) in toks.iter().enumerate() {
             match *t {
                 Tok::Star => star |= 1 << j,
                 Tok::Any => lit.iter_mut().for_each(|s| *s |= 1 << j),
@@ -373,8 +404,9 @@ mod tests {
         let specs = [Spec::new("%Y-%m-%d %H:%M:%S,%3")];
         let check = |pat: &str, msg: &str| {
             let q = Query::new(pat).unwrap();
-            Nfa::new(&q, &specs)
+            Nfa::all(&q, &specs)
                 .unwrap()
+                .remove(0)
                 .template_may_match(&tpl(msg), None)
         };
         // Static text decides.
@@ -399,7 +431,7 @@ mod tests {
     fn dictionary_refinement() {
         let specs: [Spec; 0] = [];
         let q = Query::new("blk_42 ").unwrap();
-        let nfa = Nfa::new(&q, &specs).unwrap();
+        let nfa = Nfa::all(&q, &specs).unwrap().remove(0);
         let t = tpl("Deleting block blk_1 file /data/x");
         let has = vec![b"blk_1".to_vec(), b"blk_42".to_vec()];
         let hasnt = vec![b"blk_1".to_vec(), b"blk_420".to_vec()];
@@ -453,7 +485,11 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let nfa = Nfa::new(&q, &specs).unwrap();
+            // An empty pattern matches everything; there is nothing to prune.
+            let Some(mut nfas) = Nfa::all(&q, &specs) else {
+                continue;
+            };
+            let nfa = nfas.remove(0);
             let pieces = message::pieces(&t).unwrap();
             assert!(
                 nfa.template_may_match(&pieces, None),
