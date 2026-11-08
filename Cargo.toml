@@ -32,3 +32,6 @@ codegen-units = 1
 [[test]]
 name = "cli"
 required-features = ["cli"]
+
+[dev-dependencies]
+regex = "1"
