@@ -239,6 +239,25 @@ fn grep_alternatives_inversion_and_json() {
 }
 
 #[test]
+fn pack_expands_wildcards_itself() {
+    // No shell here, so the pattern arrives literally, as it does on Windows.
+    let d = setup("wild");
+    std::fs::write(d.join("sys/kern.log"), "k1\nk2\n").unwrap();
+    std::fs::write(d.join("sys/notes.txt"), "skip me\n").unwrap();
+    let o = run(&["pack", "-q", "-o", "w.ljar", "sys/*.log", "app.l?g"], &d);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let ls = stdout(&run(&["ls", "w.ljar"], &d));
+    let streams: Vec<&str> = ls
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().last().unwrap())
+        .collect();
+    assert_eq!(streams, ["sys/auth.log", "sys/kern.log", "app.log"]);
+    let o = run(&["pack", "-q", "-o", "x.ljar", "nothing/*.log"], &d);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
 fn grep_regex() {
     let d = setup("regex");
     let count = |args: &[&str]| {

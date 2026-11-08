@@ -208,7 +208,7 @@ fn run(cli: Cli) -> Res<ExitCode> {
                 Writer::create(&output, opts)?
             };
             let (mut raw, mut lines) = (0u64, 0u64);
-            for input in &inputs {
+            for input in &expand_inputs(inputs)? {
                 let stats = if input.as_os_str() == "-" {
                     w.add_stream(&name, io::stdin().lock())?
                 } else {
@@ -628,6 +628,51 @@ fn json_str(b: &[u8]) -> String {
     }
     out.push('"');
     out
+}
+
+/// Wildcards in the last path component are expanded here, because
+/// Windows shells pass `logs\*.log` through literally. Matches are sorted;
+/// a pattern matching nothing is kept, so opening it reports the error.
+fn expand_inputs(inputs: Vec<PathBuf>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for input in inputs {
+        let name = input.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if input.exists() || !(name.contains('*') || name.contains('?')) {
+            out.push(input);
+            continue;
+        }
+        let mut re = String::from("^");
+        for c in name.chars() {
+            match c {
+                '*' => re.push_str(".*"),
+                '?' => re.push('.'),
+                c if c.is_ascii_alphanumeric() => re.push(c),
+                c => c
+                    .to_string()
+                    .bytes()
+                    .for_each(|b| re.push_str(&format!(r"\x{b:02x}"))),
+            }
+        }
+        re.push('$');
+        let q = Query::regex(&re)?.ignore_case(cfg!(windows));
+        let dir = match input.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let mut hits: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter(|e| q.is_match(e.file_name().as_encoded_bytes()))
+            .map(|e| input.with_file_name(e.file_name()))
+            .collect();
+        hits.sort();
+        if hits.is_empty() {
+            out.push(input);
+        }
+        out.append(&mut hits);
+    }
+    Ok(out)
 }
 
 /// Stream names are relative, forward-slashed paths, so archives made on
