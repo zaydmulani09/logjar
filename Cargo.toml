@@ -13,12 +13,13 @@ categories = ["compression", "command-line-utilities", "database-implementations
 [dependencies]
 clap = { version = "4.5", features = ["derive"], optional = true }
 crc32fast = "1.4"
+flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", default-features = false }
 
 [features]
 default = ["cli"]
 # The command-line tool. Library users can opt out with default-features = false.
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:flate2"]
 
 [[bin]]
 name = "logjar"
@@ -27,3 +28,7 @@ required-features = ["cli"]
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
