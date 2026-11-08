@@ -143,6 +143,54 @@ fn random_query(r: &mut Rng, lines: &[&str]) -> String {
     q
 }
 
+/// A regex built from a real line: a substring with metacharacters
+/// escaped, then digit runs, letter runs, gaps and alternatives generalized.
+fn random_regex(r: &mut Rng, lines: &[&str]) -> String {
+    let l = lines[r.below(lines.len())].trim_end_matches('\r');
+    let chars: Vec<char> = l.chars().collect();
+    if chars.is_empty() {
+        return "x".into();
+    }
+    let a = r.below(chars.len());
+    let b = (a + 1 + r.below(16)).min(chars.len());
+    let mut q = String::new();
+    if a == 0 && r.below(2) == 0 {
+        q.push('^');
+    }
+    let mut i = a;
+    while i < b {
+        let c = chars[i];
+        let run = |pred: fn(&char) -> bool| chars[i..b].iter().take_while(|x| pred(x)).count();
+        match r.below(6) {
+            0 if c.is_ascii_digit() => {
+                q.push_str(r"\d+");
+                i += run(char::is_ascii_digit);
+                continue;
+            }
+            1 if c.is_ascii_lowercase() => {
+                q.push_str("[a-z]+");
+                i += run(char::is_ascii_lowercase);
+                continue;
+            }
+            2 if i > a => q.push_str(".*"),
+            _ => {}
+        }
+        if c.is_ascii_alphanumeric() || c == ' ' || !c.is_ascii() {
+            q.push(c);
+        } else {
+            q.push_str(&format!(r"\x{:02x}", c as u32));
+        }
+        i += 1;
+    }
+    if b == chars.len() && r.below(2) == 0 {
+        q.push('$');
+    }
+    if r.below(4) == 0 && !q.starts_with('^') && !q.ends_with('$') {
+        q = format!(r"({q}|ERROR [a-z]+ \d)");
+    }
+    q
+}
+
 #[test]
 fn search_equals_naive_scan() {
     let dir = std::env::temp_dir().join(format!("logjar-diff-{}", std::process::id()));
@@ -202,8 +250,20 @@ fn search_equals_naive_scan() {
             .flat_map(|(_, _, ls)| ls.iter().map(|(l, _)| l.as_str()))
             .collect();
         for _ in 0..80 {
-            let pat = random_query(&mut r, &all);
-            let q = Query::new(&pat).unwrap().ignore_case(r.below(4) == 0);
+            let regex = r.below(2) == 0;
+            let pat = if regex {
+                random_regex(&mut r, &all)
+            } else {
+                random_query(&mut r, &all)
+            };
+            let q = if regex {
+                Query::regex(&pat)
+            } else {
+                Query::new(&pat)
+            };
+            let q = q
+                .unwrap_or_else(|e| panic!("{pat:?}: {e}"))
+                .ignore_case(r.below(4) == 0);
             let window = (r.below(3) == 0).then(|| {
                 let lo = 1_615_500_000 + r.below(86_400 * 3) as i64;
                 (
