@@ -58,7 +58,7 @@ row is checked to round-trip byte for byte.
 | Hadoop | 46.3 MiB | 20.5x | 38.1x | 42.8x | **93.5x** | 1.7s |
 | SSH | 70.0 MiB | 16.8x | 20.3x | 24.6x | **95.5x** | 2.0s |
 | BGL | 708.8 MiB | 12.9x | 22.9x | 21.7x | **25.6x** | 10.0s |
-<!-- BENCH-LARGE -->
+| HDFS (v1) | 1.5 GiB | 10.6x | 16.5x | 16.1x | **28.8x** | 12.2s |
 
 Windows 11, 8 threads (the default). Pack time includes reading the input.
 `-l 19` gets HDFS from 52.2 MiB down to 47.9 MiB, at about twice the pack time.
