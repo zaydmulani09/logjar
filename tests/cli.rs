@@ -191,12 +191,20 @@ fn ingest_then_compact() {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         for i in 0..100 {
-            writeln!(stdin, "2024-05-01 12:00:{:02} INFO round {round} request {i} ok", i % 60).unwrap();
+            writeln!(
+                stdin,
+                "2024-05-01 12:00:{:02} INFO round {round} request {i} ok",
+                i % 60
+            )
+            .unwrap();
         }
         drop(stdin);
         assert!(child.wait().unwrap().success());
     }
-    assert_eq!(stdout(&run(&["grep", "-c", "request 7 ok", "live.ljar"], &d)), "2\n");
+    assert_eq!(
+        stdout(&run(&["grep", "-c", "request 7 ok", "live.ljar"], &d)),
+        "2\n"
+    );
     let before = stdout(&run(&["cat", "live.ljar"], &d));
     assert_eq!(before.lines().count(), 200);
     assert!(run(&["compact", "live.ljar"], &d).status.success());

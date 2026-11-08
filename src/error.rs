@@ -1,9 +1,12 @@
 use std::fmt;
 
+/// `Result` with logjar's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// Everything that can go wrong in logjar.
 #[derive(Debug)]
 pub enum Error {
+    /// An I/O error from the file system or a stream.
     Io(std::io::Error),
     /// The archive bytes are not what logjar wrote (bad magic, checksum,
     /// truncated block...). Carries a short static reason.

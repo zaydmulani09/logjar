@@ -19,6 +19,7 @@ use crate::{par, timestamp, Error, Result};
 /// One matching line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
+    /// Stream id; see [`crate::Index::streams`].
     pub stream: u32,
     /// 1-based line number within the stream.
     pub line_number: u64,
@@ -31,30 +32,40 @@ pub struct Match {
 /// Totals from [`Archive::stats`].
 #[derive(Debug, Clone, Default)]
 pub struct ArchiveStats {
+    /// Segment count.
     pub segments: u64,
+    /// Line count.
     pub lines: u64,
+    /// Uncompressed bytes.
     pub raw_bytes: u64,
+    /// Bytes of all segments.
     pub stored_bytes: u64,
     /// (block name, raw bytes, compressed bytes), summed over segments.
     pub blocks: [(&'static str, u64, u64); segment::BLOCKS],
     /// Template table entries, summed over segments (not distinct).
     pub templates: u64,
+    /// Dictionary entries, summed over segments.
     pub dict_entries: u64,
 }
 
 /// Where a search spent (and saved) its effort.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchStats {
+    /// Segments considered.
     pub segments: u64,
     /// Ruled out by stream or time range from the footer alone.
     pub segments_skipped_index: u64,
     /// Read, but no template could match, so only `meta`/`dict` were inflated.
     pub segments_skipped_templates: u64,
+    /// Templates in the segments that were read.
     pub templates: u64,
+    /// Templates that survived pruning.
     pub templates_matched: u64,
+    /// Lines in all segments considered.
     pub lines_total: u64,
     /// Lines actually reconstructed and checked.
     pub lines_decoded: u64,
+    /// Lines that matched.
     pub matches: u64,
 }
 

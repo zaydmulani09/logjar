@@ -29,6 +29,7 @@ const TRAILER_LEN: u64 = 20;
 /// One named input inside an archive, typically one source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamInfo {
+    /// Name given when the stream was added, usually the source path.
     pub name: String,
     /// The last line had no trailing newline; decoding must not add one.
     pub unterminated: bool,
@@ -38,18 +39,26 @@ pub struct StreamInfo {
 /// (which stream, which time range) without reading the segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentInfo {
+    /// Byte offset of the segment in the file.
     pub offset: u64,
+    /// Compressed length in bytes.
     pub len: u64,
+    /// Index into [`Index::streams`].
     pub stream: u32,
+    /// Number of lines.
     pub lines: u64,
+    /// Uncompressed bytes, newlines included.
     pub raw_bytes: u64,
     /// Min/max timestamp in nanoseconds, over lines whose format has a year.
     pub time_range: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The footer: every stream and segment in the archive.
 pub struct Index {
+    /// Streams in the order they were first added.
     pub streams: Vec<StreamInfo>,
+    /// Segments in file order. A stream's segments appear in line order.
     pub segments: Vec<SegmentInfo>,
 }
 
@@ -219,9 +228,13 @@ impl Default for Options {
 /// Totals for one call to [`Writer::add_stream`].
 #[derive(Debug, Clone, Default)]
 pub struct StreamStats {
+    /// Lines added.
     pub lines: u64,
+    /// Uncompressed input bytes.
     pub raw_bytes: u64,
+    /// Bytes written to the archive.
     pub compressed_bytes: u64,
+    /// Segments written.
     pub segments: u64,
 }
 
@@ -262,6 +275,7 @@ impl Writer {
         })
     }
 
+    /// The index as it will be written by the next checkpoint.
     pub fn index(&self) -> &Index {
         &self.index
     }
@@ -398,6 +412,7 @@ pub struct Archive {
 }
 
 impl Archive {
+    /// Opens an archive, recovering from a torn tail if needed.
     pub fn open(path: impl AsRef<Path>) -> Result<Archive> {
         let mut file = File::open(path)?;
         let (index, size) = read_index(&mut file)?;
@@ -408,6 +423,7 @@ impl Archive {
         })
     }
 
+    /// The footer index.
     pub fn index(&self) -> &Index {
         &self.index
     }
@@ -417,6 +433,7 @@ impl Archive {
         self.size
     }
 
+    /// Looks up a stream id by name.
     pub fn stream_id(&self, name: &str) -> Option<u32> {
         self.index
             .streams
