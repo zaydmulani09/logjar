@@ -11,6 +11,7 @@ keywords = ["logs", "compression", "search", "grep", "archive"]
 categories = ["compression", "command-line-utilities", "database-implementations"]
 
 [dependencies]
+crc32fast = "1.4"
 zstd = { version = "0.13", default-features = false }
 
 [profile.release]
