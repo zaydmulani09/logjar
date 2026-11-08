@@ -239,6 +239,29 @@ fn grep_alternatives_inversion_and_json() {
 }
 
 #[test]
+fn grep_regex() {
+    let d = setup("regex");
+    let count = |args: &[&str]| {
+        let mut a = vec!["grep", "-c"];
+        a.extend_from_slice(args);
+        a.push("a.ljar");
+        stdout(&run(&a, &d))
+    };
+    assert_eq!(count(&["-E", r"after \d+ retries"]), "1\n");
+    assert_eq!(count(&["-E", "(WARN|ERROR) "]), "2\n");
+    assert_eq!(count(&["-E", "-i", "(WARN|ERROR) "]), "3\n");
+    assert_eq!(count(&["-E", r"\d ms$"]), "1\n");
+    assert_eq!(count(&["-E", r"^\tat "]), "1\n");
+    assert_eq!(count(&["-E", r"rhost=(\d+\.){3}\d+"]), "1\n");
+    assert_eq!(count(&["-E", "-e", "Slow", "-e", r"pass;"]), "2\n");
+    // Without -E the same text is a glob: parentheses are literal.
+    assert_eq!(count(&["(WARN|ERROR) "]), "0\n");
+    let bad = run(&["grep", "-E", "a(b", "a.ljar"], &d);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("unclosed"));
+}
+
+#[test]
 fn cat_time_slice() {
     let d = setup("slice");
     let o = stdout(&run(

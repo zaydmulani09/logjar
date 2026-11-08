@@ -99,8 +99,8 @@ enum Cmd {
     },
     /// List the streams in an archive
     Ls { archive: PathBuf },
-    /// Search archives with a glob (`*` any run, `?` any byte) without
-    /// decompressing them whole
+    /// Search archives with a glob (`*` any run, `?` any byte) or, with -E,
+    /// a regex, without decompressing them whole
     Grep {
         /// PATTERN then ARCHIVE..., or just ARCHIVE... when -e is given
         #[arg(required = true, value_name = "PATTERN|ARCHIVE")]
@@ -108,6 +108,9 @@ enum Cmd {
         /// A pattern; repeat to match any of several
         #[arg(short = 'e', long = "regexp", value_name = "PATTERN")]
         patterns: Vec<String>,
+        /// Patterns are regular expressions, not globs
+        #[arg(short = 'E', long)]
+        regex: bool,
         /// Select lines that match none of the patterns
         #[arg(short = 'v', long)]
         invert_match: bool,
@@ -369,6 +372,7 @@ fn run(cli: Cli) -> Res<ExitCode> {
         Cmd::Grep {
             mut args,
             mut patterns,
+            regex,
             invert_match,
             json,
             ignore_case,
@@ -388,9 +392,13 @@ fn run(cli: Cli) -> Res<ExitCode> {
             if archives.is_empty() {
                 return Err("no archive given".into());
             }
-            let mut q = Query::new(&patterns[0])?;
+            let mut q = if regex {
+                Query::regex(&patterns[0])?
+            } else {
+                Query::new(&patterns[0])?
+            };
             for p in &patterns[1..] {
-                q = q.or(p)?;
+                q = if regex { q.or_regex(p)? } else { q.or(p)? };
             }
             let mut q = q.ignore_case(ignore_case).invert(invert_match);
             if let Some(t) = after {
