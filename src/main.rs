@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use logjar::{Archive, Options, Writer};
+use logjar::{Archive, Options, Query, Writer};
 
 #[derive(Parser)]
 #[command(name = "logjar", version, about = "Searchable compressed log archives")]
@@ -48,6 +48,47 @@ enum Cmd {
     },
     /// List the streams in an archive
     Ls { archive: PathBuf },
+    /// Search archives with a glob (`*` any run, `?` any byte) without
+    /// decompressing them whole
+    Grep {
+        pattern: String,
+        #[arg(required = true)]
+        archives: Vec<PathBuf>,
+        /// Case-insensitive (ASCII)
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Print only the number of matching lines
+        #[arg(short, long)]
+        count: bool,
+        /// Prefix lines with their line number in the stream
+        #[arg(short = 'n', long)]
+        line_number: bool,
+        /// Always prefix lines with the stream name
+        #[arg(short = 'H', long)]
+        with_stream: bool,
+        /// Only lines at or after this time (2015-10-18, 2015-10-18T18:01:47, epoch seconds)
+        #[arg(long)]
+        after: Option<String>,
+        /// Only lines before this time
+        #[arg(long)]
+        before: Option<String>,
+        /// Only search these streams
+        #[arg(short, long)]
+        stream: Vec<String>,
+        /// Stop after this many matches
+        #[arg(short = 'm', long)]
+        max_count: Option<u64>,
+        /// Report how much work was skipped, on stderr
+        #[arg(long)]
+        stats: bool,
+    },
+    /// Show the distinct line templates (log types), most common first
+    Templates {
+        archive: PathBuf,
+        /// How many to show
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -143,6 +184,96 @@ fn run(cli: Cli) -> Res<ExitCode> {
                     raw as f64 / stored.max(1) as f64,
                     s.name
                 )?;
+            }
+        }
+        Cmd::Grep {
+            pattern,
+            archives,
+            ignore_case,
+            count,
+            line_number,
+            with_stream,
+            after,
+            before,
+            stream,
+            max_count,
+            stats,
+        } => {
+            let mut q = Query::new(&pattern)?.ignore_case(ignore_case);
+            if let Some(t) = after {
+                q = q.after(Query::parse_time(&t)?);
+            }
+            if let Some(t) = before {
+                q = q.before(Query::parse_time(&t)?);
+            }
+            let mut out = BufWriter::with_capacity(1 << 16, io::stdout().lock());
+            let mut total = 0u64;
+            let mut io_err = None;
+            for path in &archives {
+                let a = Archive::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let ids: Vec<u32> = stream.iter().filter_map(|n| a.stream_id(n)).collect();
+                if !stream.is_empty() && ids.is_empty() {
+                    continue;
+                }
+                let prefix = with_stream || archives.len() > 1 || a.index().streams.len() > 1;
+                let names = &a.index().streams;
+                let started = std::time::Instant::now();
+                let st = a.search(&q, &ids, |m| {
+                    total += 1;
+                    if !count {
+                        let r = (|| {
+                            if prefix {
+                                write!(out, "{}:", names[m.stream as usize].name)?;
+                            }
+                            if line_number {
+                                write!(out, "{}:", m.line_number)?;
+                            }
+                            out.write_all(&m.line)?;
+                            out.write_all(b"\n")
+                        })();
+                        if let Err(e) = r {
+                            io_err = Some(e);
+                            return false;
+                        }
+                    }
+                    max_count.map_or(true, |mx| total < mx)
+                })?;
+                if let Some(e) = io_err.take() {
+                    return Err(e.into());
+                }
+                if stats {
+                    eprintln!(
+                        "{}: {} matches in {:.3}s | segments {} (skipped {} by index, {} by templates) | templates {}/{} | lines decoded {}/{}",
+                        path.display(),
+                        st.matches,
+                        started.elapsed().as_secs_f64(),
+                        st.segments,
+                        st.segments_skipped_index,
+                        st.segments_skipped_templates,
+                        st.templates_matched,
+                        st.templates,
+                        st.lines_decoded,
+                        st.lines_total
+                    );
+                }
+                if max_count.is_some_and(|mx| total >= mx) {
+                    break;
+                }
+            }
+            if count {
+                writeln!(out, "{total}")?;
+            }
+            out.flush()?;
+            return Ok(if total > 0 { ExitCode::SUCCESS } else { ExitCode::from(1) });
+        }
+        Cmd::Templates { archive, top } => {
+            let a = Archive::open(&archive)?;
+            let all = a.templates()?;
+            let lines: u64 = all.iter().map(|t| t.1).sum();
+            let mut out = io::stdout().lock();
+            writeln!(out, "{} templates over {lines} lines", all.len())?;
+            for (t, n) in all.iter().take(top) {
+                writeln!(out, "{n:>10} {:>6.2}%  {t}", 100.0 * *n as f64 / lines.max(1) as f64)?;
             }
         }
     }
